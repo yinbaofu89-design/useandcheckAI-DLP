@@ -256,29 +256,36 @@ def render_debug_logs():
     
     st.caption(f"📊 ログ件数: {len(st.session_state.debug_logs)} 件")
 
-# ==================== 情報チェックAIプロンプト ====================
+# ==================== 情報チェックAIプロンプト（強化版） ====================
 def build_information_check_prompt(check_items):
+    """情報チェックAIのプロンプトを生成する（強化版：推測出力を厳禁）"""
     items = [x["name"] for x in check_items if x.get("enabled")]
     item_lines = "\n".join(f"- {item}" for item in items)
 
     return f"""あなたは情報漏えい防止(DLP)の補助分析を行うAIです。
-提出されたファイルとメッセージの内容だけを分析してください。
+提出されたファイルとメッセージの内容だけを**厳密に**分析してください。
 
-以下の情報チェック項目について、提出されたファイルまたはメッセージに該当情報が含まれているか確認してください。
+以下の情報チェック項目について、提出されたファイルまたはメッセージに該当情報が**実際に含まれているか**確認してください。
 
 {item_lines}
 
-【出力規則 - 厳守】
-1. 該当する項目がある場合だけ、その項目の「内包」行を出力してください。
-2. 該当しない項目は絶対に出力しないでください。
-3. 該当項目の具体的な内容を確認できる場合だけ、最後に「ヒットした○○内容-内容」の形式で出力してください。
-4. 出力は下記の形式以外を絶対に追加しないでください。
-5. 理由、説明、判定、挨拶、要約、注意事項、Markdown、箇条書き記号は追加しないでください。
-6. 同じ情報を重複して出力しないでください。
-7. 情報を推測して作らないでください。提出された内容に実際に存在する情報だけを出力してください。
-8. 追加項目についても同じ規則を適用してください。
+【最重要規則 - 絶対に厳守すること】
+1. 該当する項目が**実際に存在する場合だけ**、その項目の「内包」行を出力してください。
+2. 該当しない項目は**絶対に出力しないでください**。
+3. 具体的な内容が**明確に確認できる場合だけ**、「ヒットした○○内容-内容」の形式で出力してください。
+4. **推測や類推に基づく出力は絶対に行わないでください**。
+5. 「可能性がある」「おそらく」「と思われる」といった曖昧な判断での出力は禁止します。
+6. 出力は下記の形式以外を**絶対に追加しないでください**。
+7. 理由、説明、判定、挨拶、要約、注意事項、Markdown、箇条書き記号は**一切追加しないでください**。
+8. 同じ情報を重複して出力しないでください。
+9. **何も検出されなかった場合は、空文字列（何も出力しない）を返してください。**
 
-【出力形式 - この形式以外は絶対に出力しないでください】
+【出力ルール】
+- 検出した項目がある場合 → その項目の「内包」行のみを出力
+- 検出した項目がない場合 → **何も出力しない（空文字列を返す）**
+- 具体的な内容が確認できた場合 → 「ヒットした○○内容-内容」を追加
+
+【出力形式（これは形式の例示であり、実際の出力は検出結果に依存します）】
 電話番号情報内包
 住所情報内包
 名前情報内包
@@ -293,11 +300,12 @@ def build_information_check_prompt(check_items):
 ヒットしたクレジットカード内容-XXXXXXXX
 ヒットしたマイナンバー内容-XXXXXXXX
 
-【重要】
-上記は形式の例です。実際には検知された項目だけを出力してください。
-「情報内包」行は、項目名に対応する短い固定表現にしてください。
-具体的なヒット内容が確認できない場合、その「ヒットした...内容-」行は出力しないでください。
-これ以外の内容は絶対に追加しないでください。"""
+【重要 - 繰り返し強調】
+上記は**出力形式の例**です。実際には**検知された項目だけ**を出力してください。
+**「情報内包」行は、実際にその情報が含まれていると確信できる場合のみ出力してください。**
+具体的なヒット内容が確認できない場合、その「ヒットした...内容-」行は**絶対に出力しないでください**。
+**これ以外の内容は絶対に追加しないでください。**
+**何も検出されなかった場合は、空文字列（何も出力しない）を返してください。**"""
 
 # ==================== ファイル内容抽出関数 ====================
 def extract_file_content(file_bytes, filename, max_chars=5000):
@@ -346,10 +354,10 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
     else:
         return f"（バイナリファイル: {filename}、{len(file_bytes)}バイト）"
 
-# ==================== 情報チェックAI実行（拡張版） ====================
+# ==================== 情報チェックAI実行（強化版） ====================
 def run_information_check_ai(file_bytes, filename, user_message, check_items, additional_context=None):
     """
-    情報チェックAIを実行する（追加コンテキストに対応）
+    情報チェックAIを実行する（強化版：推測出力を厳禁）
     
     Args:
         file_bytes: ファイルデータ
@@ -360,9 +368,19 @@ def run_information_check_ai(file_bytes, filename, user_message, check_items, ad
     """
     prompt = build_information_check_prompt(check_items)
     
+    # システムメッセージにプロンプトを設定
     messages = [
         {"role": "system", "content": prompt},
-        {"role": "user", "content": "以下のファイルとメッセージを分析して、指定された固定フォーマットで出力してください。"}
+        {"role": "user", "content": """以下のファイルとメッセージを厳密に分析してください。
+
+【厳守事項 - 必ず守ること】
+1. 実際に存在する情報だけを検出してください。
+2. 推測や類推は絶対に行わないでください。
+3. 検出した情報がない場合は、何も出力しないでください。
+4. 指定された形式以外の出力は絶対に行わないでください。
+5. 「可能性がある」「おそらく」といった曖昧な表現は使用しないでください。
+
+分析対象:"""}
     ]
     
     user_content = ""
@@ -383,6 +401,16 @@ def run_information_check_ai(file_bytes, filename, user_message, check_items, ad
         messages.append({"role": "user", "content": user_content})
     else:
         messages.append({"role": "user", "content": "分析する内容がありません。"})
+    
+    # 最後に再度、出力形式を明確に指示
+    messages.append({
+        "role": "user", 
+        "content": """再度確認します：
+- 実際に存在する情報だけを出力してください。
+- 存在しない情報は絶対に出力しないでください。
+- 何も検出されなかった場合は、空文字列（何も出力しない）を返してください。
+- 指定された形式以外の出力は絶対に行わないでください。"""
+    })
     
     return call_ai_api(messages, max_tokens=500)
 
@@ -426,7 +454,7 @@ def call_ai_api(messages, max_tokens=200):
             "model": model_name,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.7,
+            "temperature": 0.1,  # 温度を下げて確定的な出力に
             "stream": False
         }
         
@@ -434,6 +462,7 @@ def call_ai_api(messages, max_tokens=200):
             add_debug_log("AIリクエスト", f"AI API呼び出し (モデル: {model_name})", "info", 0, {
                 "url": api_url,
                 "model": model_name,
+                "temperature": 0.1,
                 "messages": [{"role": m["role"], "content": str(m["content"])[:200]} for m in messages]
             })
         
@@ -455,6 +484,28 @@ def call_ai_api(messages, max_tokens=200):
                 choice = result["choices"][0]
                 message = choice.get("message", {})
                 content = message.get("content", "")
+                
+                # 空の応答や余計なテキストを除去
+                if content:
+                    # 余計な説明文を除去（「はい」「わかりました」などで始まる場合）
+                    lines = content.strip().split('\n')
+                    filtered_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        # 空行はスキップ
+                        if not line:
+                            continue
+                        # 挨拶や説明文をスキップ（「はい」「わかりました」「以下は」などで始まる行）
+                        skip_patterns = ['はい、', 'わかりました', '以下は', '分析結果', '【', '（', '注意', '重要']
+                        should_skip = False
+                        for pattern in skip_patterns:
+                            if line.startswith(pattern):
+                                should_skip = True
+                                break
+                        if not should_skip:
+                            filtered_lines.append(line)
+                    
+                    content = '\n'.join(filtered_lines)
                 
                 if not content:
                     return "（応答がありませんでした）", elapsed
@@ -1562,7 +1613,7 @@ with main_col:
             st.success(f"✅ **Monitorモード完了** (合計: {time.time() - st.session_state.process_start_time:.2f}秒)")
             add_debug_log("Monitor-完了", f"全ての処理が完了しました", "success", time.time() - st.session_state.process_start_time)
         
-        # ==================== Inlineモード（修正版） ====================
+        # ==================== Inlineモード ====================
         else:
             st.info(f"📊 **Inlineモード**で実行します")
             st.info("🔒 送信内容をDDSでチェックし、違反があればブロックします")
@@ -1700,7 +1751,7 @@ with main_col:
                 st.success(f"✅ [Inline-1.5] AIからレスポンスを受信 (⏱️ {ai_elapsed:.2f}秒)")
                 add_debug_log("Inline-ステップ1.5", f"AI応答受信", "success", ai_elapsed)
                 
-                # ---- ステップ1.6: AI回答をDDSでチェック（新規追加） ----
+                # ---- ステップ1.6: AI回答をDDSでチェック ----
                 st.info("🔍 [Inline-1.6] AI回答をDDSでチェック中...")
                 
                 ai_check_violations, ai_check_request_id, ai_check_response_data, ai_check_error, ai_check_elapsed = check_ai_response_with_dds(
