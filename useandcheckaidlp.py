@@ -276,14 +276,12 @@ def build_information_check_prompt(check_items):
 4. **推測や類推に基づく出力は絶対に行わないでください**。
 5. 出力は**検出した項目の行のみ**にしてください。
 6. 理由、説明、挨拶、要約、注意事項、Markdownは**一切追加しないでください**。
-7. **何も検出されなかった場合は、何も出力しないでください（空文字列を返してください）**。
 
 【出力ルール】
 - 検出した項目がある場合 → その項目の行のみを出力
-- 検出した項目がない場合 → **何も出力しない**
+- 検出した項目がない場合 → **「検出結果なし」と出力してください**
 
 【出力例（あくまで例であり、実際に出力するかは検出結果に依存します）】
-※ 以下の例は「もし検出された場合の形式」を示すものであり、すべてを出力することを意味しません。
 
 検出例1（名前と住所が検出された場合）:
 名前情報内包
@@ -296,13 +294,13 @@ def build_information_check_prompt(check_items):
 ヒットした電話番号内容-090-1234-5678
 
 検出例3（何も検出されなかった場合）:
-（何も出力しない）
+検出結果なし
 
 【重要 - 繰り返し強調】
 - **検出された項目だけ**を出力してください。
 - **検出されていない項目は絶対に出力しないでください**。
 - 上記の例は「形式の例」であり、「出力すべき項目のリスト」ではありません。
-- **何も検出されなかった場合は、空文字列（何も出力しない）を返してください。**"""
+- **何も検出されなかった場合は、「検出結果なし」と出力してください。**"""
 
 # ==================== ファイル内容抽出関数 ====================
 def extract_file_content(file_bytes, filename, max_chars=5000):
@@ -373,7 +371,7 @@ def run_information_check_ai(file_bytes, filename, user_message, check_items, ad
 【厳守事項 - 必ず守ること】
 1. 実際に存在する情報だけを検出してください。
 2. 推測や類推は絶対に行わないでください。
-3. 検出した情報がない場合は、何も出力しないでください。
+3. 検出した情報がない場合は、「検出結果なし」と出力してください。
 4. 指定された形式以外の出力は絶対に行わないでください。
 5. 「可能性がある」「おそらく」といった曖昧な表現は使用しないでください。
 
@@ -405,7 +403,7 @@ def run_information_check_ai(file_bytes, filename, user_message, check_items, ad
         "content": """再度確認します：
 - 実際に存在する情報だけを出力してください。
 - 存在しない情報は絶対に出力しないでください。
-- 何も検出されなかった場合は、空文字列（何も出力しない）を返してください。
+- 何も検出されなかった場合は、「検出結果なし」と出力してください。
 - 指定された形式以外の出力は絶対に行わないでください。"""
     })
     
@@ -482,7 +480,11 @@ def call_ai_api(messages, max_tokens=200):
                 message = choice.get("message", {})
                 content = message.get("content", "")
                 
-                # 空の応答や余計なテキストを除去
+                # 空の応答の場合は「検出結果なし」として扱う
+                if not content or content.strip() == "":
+                    content = "検出結果なし"
+                
+                # 余計なテキストを除去
                 if content:
                     lines = content.strip().split('\n')
                     filtered_lines = []
@@ -500,10 +502,10 @@ def call_ai_api(messages, max_tokens=200):
                         if not should_skip:
                             filtered_lines.append(line)
                     
-                    content = '\n'.join(filtered_lines)
-                
-                if not content:
-                    return "（応答がありませんでした）", elapsed
+                    if filtered_lines:
+                        content = '\n'.join(filtered_lines)
+                    else:
+                        content = "検出結果なし"
                 
                 return content, elapsed
             
@@ -629,7 +631,7 @@ def call_openai_with_file(messages, file_bytes=None, filename=None, mime_type=No
             for content in item.get("content", []):
                 if content.get("type") == "output_text" and content.get("text"):
                     texts.append(content["text"])
-        return ("\n".join(texts) if texts else "（応答がありませんでした）"), elapsed
+        return ("\n".join(texts) if texts else "検出結果なし"), elapsed
 
     except requests.exceptions.Timeout:
         st.error("❌ OpenAI APIタイムアウト")
