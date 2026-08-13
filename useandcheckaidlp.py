@@ -74,6 +74,9 @@ if "send_target" not in st.session_state:
     st.session_state.send_target = "both"
 if "info_check_done" not in st.session_state:
     st.session_state.info_check_done = False
+# DDSレスポンス表示トグル（デフォルト: False = 非表示）
+if "show_dds_response" not in st.session_state:
+    st.session_state.show_dds_response = False
 
 # 情報チェックリスト項目
 if "info_check_items" not in st.session_state:
@@ -853,6 +856,22 @@ with st.sidebar:
 
     st.divider()
 
+    # DDSレスポンス表示トグル（デフォルト: OFF）
+    st.subheader("📋 DDSレスポンス表示")
+    show_dds = st.checkbox(
+        "DDSレスポンスをチャット履歴に表示",
+        value=st.session_state.get("show_dds_response", False),
+        help="チェックすると、すべてのDDSレスポンス詳細がチャット履歴に表示されます"
+    )
+    st.session_state.show_dds_response = show_dds
+    
+    if show_dds:
+        st.info("✅ DDSレスポンス表示: ON")
+    else:
+        st.info("🔘 DDSレスポンス表示: OFF")
+
+    st.divider()
+
     st.subheader("🔎 情報チェックAI")
     st.caption("AIによるDLP補助分析。初期状態では全項目ONです。")
 
@@ -1048,6 +1067,10 @@ with main_col:
     mode_color = "🟢" if st.session_state.operation_mode == "Monitor" else "🔵"
     st.caption(f"{mode_color} 現在のモード: **{st.session_state.operation_mode}** | 送信ターゲット: **{send_target}**")
     
+    # DDSレスポンス表示状態を表示
+    if st.session_state.show_dds_response:
+        st.info("📋 DDSレスポンス表示: **ON** - すべてのDDSレスポンスが表示されます")
+    
     # チャット履歴表示
     chat_container = st.container()
     with chat_container:
@@ -1056,8 +1079,8 @@ with main_col:
                 st.write(message["content"])
                 if "violations" in message and message["violations"]:
                     st.error(f"🚫 ポリシー違反: {', '.join([v['name'] for v in message['violations']])}")
-                # DDSレスポンス詳細があれば表示
-                if "dds_response" in message and message["dds_response"]:
+                # DDSレスポンス詳細（トグルがONの場合のみ表示）
+                if "dds_response" in message and message["dds_response"] and st.session_state.show_dds_response:
                     with st.expander("📋 DDSレスポンス詳細", expanded=False):
                         st.markdown(message["dds_response"])
 
@@ -1257,8 +1280,8 @@ with main_col:
                 add_debug_log("Monitor-1-ステップ3", f"エラー: {error_info2}", "error", elapsed3)
                 st.stop()
             
-            # DDSレスポンスを整形
-            dds_response_text = format_dds_response(response_data2, v2, request_id2)
+            # DDSレスポンスを整形（トグルがONの場合のみ保存）
+            dds_response_text = format_dds_response(response_data2, v2, request_id2) if st.session_state.show_dds_response else None
             
             # ---- ステップ4: 1つ目の結果表示 ----
             if v2 and len(v2) > 0:
@@ -1267,33 +1290,41 @@ with main_col:
                 add_debug_log("Monitor-1-ステップ4", f"AI応答にポリシー違反: {', '.join(policy_names)}", "warning", elapsed3)
                 
                 error_msg = f"⚠️ AIの回答にDLP違反が検出されました（違反: {', '.join(policy_names)}）\n\n---\n{ai_response}"
-                st.session_state.messages.append({
+                msg_data = {
                     "role": "assistant",
                     "content": error_msg,
-                    "violations": v2,
-                    "dds_response": dds_response_text
-                })
+                    "violations": v2
+                }
+                if dds_response_text:
+                    msg_data["dds_response"] = dds_response_text
+                st.session_state.messages.append(msg_data)
+                
                 with st.chat_message("assistant"):
                     st.warning(f"⚠️ AIの回答にDLP違反が検出されました")
                     st.write(ai_response)
                     st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
-                    with st.expander("📋 DDSレスポンス詳細", expanded=False):
-                        st.markdown(dds_response_text)
+                    if dds_response_text:
+                        with st.expander("📋 DDSレスポンス詳細", expanded=False):
+                            st.markdown(dds_response_text)
             else:
                 st.success("✅ AI応答にポリシー違反はありません")
                 add_debug_log("Monitor-1-ステップ4", "AI応答にポリシー違反なし", "success", elapsed3)
                 
-                st.session_state.messages.append({
+                msg_data = {
                     "role": "assistant",
                     "content": ai_response,
-                    "violations": [],
-                    "dds_response": dds_response_text
-                })
+                    "violations": []
+                }
+                if dds_response_text:
+                    msg_data["dds_response"] = dds_response_text
+                st.session_state.messages.append(msg_data)
+                
                 with st.chat_message("assistant"):
                     st.write(ai_response)
                     st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
-                    with st.expander("📋 DDSレスポンス詳細", expanded=False):
-                        st.markdown(dds_response_text)
+                    if dds_response_text:
+                        with st.expander("📋 DDSレスポンス詳細", expanded=False):
+                            st.markdown(dds_response_text)
             
             # ============================================================
             # 2つ目のリクエスト: 情報チェックAI分析結果をDDSに送信
@@ -1361,8 +1392,8 @@ with main_col:
                     st.error(f"❌ DDSエラー: {error_info3}")
                     add_debug_log("Monitor-2-ステップ2", f"エラー: {error_info3}", "error", elapsed6)
                 else:
-                    # DDSレスポンスを整形（情報チェック用）
-                    info_dds_response = format_dds_response(response_data3, v3, request_id3)
+                    # DDSレスポンスを整形（トグルがONの場合のみ）
+                    info_dds_response = format_dds_response(response_data3, v3, request_id3) if st.session_state.show_dds_response else None
                     
                     # 結果表示
                     if v3 and len(v3) > 0:
@@ -1373,7 +1404,7 @@ with main_col:
                         st.success("✅ 情報チェックAI分析結果にポリシー違反はありません")
                         add_debug_log("Monitor-2-ステップ3", "情報チェック結果にポリシー違反なし", "success", elapsed6)
                     
-                    # 情報チェックのDDSレスポンスをメッセージとして追加
+                    # 情報チェックのメッセージを構築
                     info_msg = f"📊 **情報チェックAI分析結果のDDS検査**\n\n"
                     if v3 and len(v3) > 0:
                         policy_names = [v["name"] for v in v3]
@@ -1381,19 +1412,23 @@ with main_col:
                     else:
                         info_msg += "✅ 違反は検出されませんでした\n\n"
                     info_msg += "---\n"
-                    info_msg += f"**分析結果:**\n```\n{info_result}\n```\n\n"
-                    info_msg += "---\n"
-                    info_msg += info_dds_response
+                    info_msg += f"**分析結果:**\n```\n{info_result}\n```"
                     
-                    st.session_state.messages.append({
+                    msg_data = {
                         "role": "assistant",
                         "content": info_msg,
                         "violations": v3,
-                        "dds_response": info_dds_response,
                         "is_info_check": True
-                    })
+                    }
+                    if info_dds_response:
+                        msg_data["dds_response"] = info_dds_response
+                    st.session_state.messages.append(msg_data)
+                    
                     with st.chat_message("assistant"):
                         st.markdown(info_msg)
+                        if info_dds_response:
+                            with st.expander("📋 DDSレスポンス詳細", expanded=False):
+                                st.markdown(info_dds_response)
             else:
                 st.warning("⚠️ 情報チェックAIの結果がないため、DDSへの送信をスキップしました")
             
@@ -1522,6 +1557,9 @@ with main_col:
                 add_debug_log("Inline-ステップ3", f"エラー: {error_info}", "error", elapsed3)
                 st.stop()
             
+            # DDSレスポンスを整形（トグルがONの場合のみ）
+            dds_response_text = format_dds_response(response_data, violations, request_id) if st.session_state.show_dds_response else None
+            
             # ステップ4: 違反チェック
             if violations and len(violations) > 0:
                 policy_names = [v["name"] for v in violations]
@@ -1529,38 +1567,40 @@ with main_col:
                 st.error("❌ AIを継続で利用できません")
                 add_debug_log("Inline-ステップ4", f"ポリシー違反: {', '.join(policy_names)} - AI利用不可", "error", elapsed3)
                 
-                # DDSレスポンスを整形
-                dds_response_text = format_dds_response(response_data, violations, request_id)
-                
                 error_msg = f"🚫 ポリシー違反が検出されたため、AIを継続で利用できません。\n違反: {', '.join(policy_names)}"
-                st.session_state.messages.append({
+                msg_data = {
                     "role": "assistant",
                     "content": error_msg,
-                    "violations": violations,
-                    "dds_response": dds_response_text
-                })
+                    "violations": violations
+                }
+                if dds_response_text:
+                    msg_data["dds_response"] = dds_response_text
+                st.session_state.messages.append(msg_data)
+                
                 with st.chat_message("assistant"):
                     st.error(error_msg)
-                    with st.expander("📋 DDSレスポンス詳細", expanded=False):
-                        st.markdown(dds_response_text)
+                    if dds_response_text:
+                        with st.expander("📋 DDSレスポンス詳細", expanded=False):
+                            st.markdown(dds_response_text)
             else:
                 st.success("✅ ポリシー違反はありません - AI回答を表示")
                 add_debug_log("Inline-ステップ4", "ポリシー違反なし - AI回答を表示", "success", elapsed3)
                 
-                # DDSレスポンスを整形
-                dds_response_text = format_dds_response(response_data, violations, request_id)
-                
-                st.session_state.messages.append({
+                msg_data = {
                     "role": "assistant",
                     "content": ai_response,
-                    "violations": [],
-                    "dds_response": dds_response_text
-                })
+                    "violations": []
+                }
+                if dds_response_text:
+                    msg_data["dds_response"] = dds_response_text
+                st.session_state.messages.append(msg_data)
+                
                 with st.chat_message("assistant"):
                     st.write(ai_response)
                     st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
-                    with st.expander("📋 DDSレスポンス詳細", expanded=False):
-                        st.markdown(dds_response_text)
+                    if dds_response_text:
+                        with st.expander("📋 DDSレスポンス詳細", expanded=False):
+                            st.markdown(dds_response_text)
             
             st.success(f"✅ **Inlineモード完了** (合計: {time.time() - st.session_state.process_start_time:.2f}秒)")
             add_debug_log("Inline-完了", f"全ての処理が完了しました", "success", time.time() - st.session_state.process_start_time)
