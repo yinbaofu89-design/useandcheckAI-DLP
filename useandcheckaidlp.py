@@ -10,6 +10,7 @@ import time
 import threading
 import io
 from PIL import Image
+import re
 
 # ページ設定
 st.set_page_config(
@@ -65,7 +66,12 @@ if "process_start_time" not in st.session_state:
     st.session_state.process_start_time = None
 if "show_debug_panel" not in st.session_state:
     st.session_state.show_debug_panel = False
+if "operation_mode" not in st.session_state:
+    st.session_state.operation_mode = "Monitor"
+if "send_target" not in st.session_state:
+    st.session_state.send_target = "both"
 
+# 情報チェックリスト項目
 if "info_check_items" not in st.session_state:
     st.session_state.info_check_items = [
         {"name": "日本の電話番号情報", "enabled": True},
@@ -83,14 +89,16 @@ AI_PROVIDERS = {
         "models": ["deepseek-chat", "deepseek-coder"],
         "default_model": "deepseek-chat",
         "api_key_required": True,
-        "description": "DeepSeek API"
+        "description": "DeepSeek API",
+        "supports_file_upload": True  # DeepSeekはファイルアップロードに対応
     },
     "OpenAI": {
         "url": "https://api.openai.com/v1/responses",
         "models": ["gpt-5", "gpt-5-mini"],
         "default_model": "gpt-5-mini",
         "api_key_required": True,
-        "description": "OpenAI API"
+        "description": "OpenAI API",
+        "supports_file_upload": True
     },
     "ローカル (LM Studio)": {
         "url": "http://localhost:1234/v1",
@@ -98,7 +106,8 @@ AI_PROVIDERS = {
         "default_model": "Qwen3 8B - Q4_K_M",
         "api_key_required": False,
         "default_api_key": "1234",
-        "description": "LM Studio ローカルサーバー"
+        "description": "LM Studio ローカルサーバー",
+        "supports_file_upload": False
     },
     "ローカル (Ollama)": {
         "url": "http://localhost:11434/v1/chat/completions",
@@ -106,14 +115,16 @@ AI_PROVIDERS = {
         "default_model": "llama3",
         "api_key_required": False,
         "default_api_key": "ollama",
-        "description": "Ollama ローカルサーバー"
+        "description": "Ollama ローカルサーバー",
+        "supports_file_upload": False
     },
     "Groq": {
         "url": "https://api.groq.com/openai/v1/chat/completions",
         "models": ["llama3-70b-8192", "llama3-8b-8192", "mixtral-8x7b-32768", "gemma2-9b-it"],
         "default_model": "llama3-70b-8192",
         "api_key_required": True,
-        "description": "Groq API"
+        "description": "Groq API",
+        "supports_file_upload": False
     }
 }
 
@@ -153,9 +164,15 @@ def get_mime_type(filename):
     }
     return mime_map.get(ext, 'application/octet-stream')
 
+def is_image_mime(mime_type):
+    return bool(mime_type) and mime_type.lower().startswith("image/")
+
+def build_data_url(file_bytes, mime_type):
+    encoded = base64.b64encode(file_bytes).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
+
 # ==================== デバッグログ関数 ====================
 def add_debug_log(step, message, log_type="info", elapsed_time=None, details=None):
-    """デバッグログを追加する関数"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     st.session_state.log_counter += 1
     log_entry = {
@@ -171,18 +188,15 @@ def add_debug_log(step, message, log_type="info", elapsed_time=None, details=Non
     st.session_state.show_debug_panel = True
 
 def clear_debug_logs():
-    """デバッグログをクリアする関数"""
     st.session_state.debug_logs = []
     st.session_state.log_counter = 0
     st.session_state.show_debug_panel = False
 
 def render_debug_logs():
-    """デバッグログを表示する関数（右パネル用）"""
     if not st.session_state.debug_logs:
         st.info("📋 デバッグログはありません")
         return
     
-    # ログ表示
     for log in st.session_state.debug_logs:
         log_id = log["id"]
         timestamp = log["timestamp"]
@@ -192,18 +206,8 @@ def render_debug_logs():
         elapsed = log.get("elapsed_time")
         details = log.get("details")
         
-        icon_map = {
-            "info": "ℹ️",
-            "success": "✅",
-            "warning": "⚠️",
-            "error": "❌"
-        }
-        color_map = {
-            "info": "#0066cc",
-            "success": "#00aa00",
-            "warning": "#cc8800",
-            "error": "#cc0000"
-        }
+        icon_map = {"info": "ℹ️", "success": "✅", "warning": "⚠️", "error": "❌"}
+        color_map = {"info": "#0066cc", "success": "#00aa00", "warning": "#cc8800", "error": "#cc0000"}
         
         icon = icon_map.get(log_type, "ℹ️")
         color = color_map.get(log_type, "#0066cc")
@@ -212,36 +216,21 @@ def render_debug_logs():
         if elapsed is not None:
             time_info += f" | ⏱️ {elapsed:.3f}秒"
         
-        # ログ表示
         st.markdown(
             f"""
-            <div style="
-                border-left: 3px solid {color};
-                padding: 4px 8px;
-                margin: 2px 0;
-                background-color: #f8f9fa;
-                border-radius: 3px;
-                font-family: monospace;
-                font-size: 12px;
-            ">
-                <div>
-                    <span style="font-weight: bold; color: {color};">[{step}]</span>
-                    {icon} {message}
-                </div>
-                <div style="font-size: 10px; color: #888;">
-                    {time_info}
-                </div>
+            <div style="border-left: 3px solid {color}; padding: 4px 8px; margin: 2px 0; 
+                        background-color: #f8f9fa; border-radius: 3px; font-family: monospace; font-size: 12px;">
+                <div><span style="font-weight: bold; color: {color};">[{step}]</span> {icon} {message}</div>
+                <div style="font-size: 10px; color: #888;">{time_info}</div>
             </div>
             """,
             unsafe_allow_html=True
         )
         
-        # 詳細情報があれば表示
         if details:
             with st.expander(f"📝 詳細 (ID: {log_id})", expanded=False):
                 st.json(details)
     
-    # ログ管理ボタン（一意のキーを設定）
     st.divider()
     col1, col2 = st.columns(2)
     with col1:
@@ -258,7 +247,7 @@ def render_debug_logs():
     
     st.caption(f"📊 ログ件数: {len(st.session_state.debug_logs)} 件")
 
-# ==================== 情報チェックAI分析 ====================
+# ==================== 情報チェックAIプロンプト（固定フォーマット） ====================
 def build_information_check_prompt(check_items):
     """情報チェックAIに必ず固定フォーマットで回答させるための指示を生成する。"""
     items = [x["name"] for x in check_items if x.get("enabled")]
@@ -271,7 +260,7 @@ def build_information_check_prompt(check_items):
 
 {item_lines}
 
-【出力規則】
+【出力規則 - 厳守】
 1. 該当する項目がある場合だけ、その項目の「内包」行を出力してください。
 2. 該当しない項目は絶対に出力しないでください。
 3. 該当項目の具体的な内容を確認できる場合だけ、最後に「ヒットした○○内容-内容」の形式で出力してください。
@@ -281,7 +270,7 @@ def build_information_check_prompt(check_items):
 7. 情報を推測して作らないでください。提出された内容に実際に存在する情報だけを出力してください。
 8. 追加項目についても同じ規則を適用してください。
 
-【出力形式】
+【出力形式 - この形式以外は絶対に出力しないでください】
 電話番号情報内包
 住所情報内包
 名前情報内包
@@ -302,202 +291,178 @@ def build_information_check_prompt(check_items):
 具体的なヒット内容が確認できない場合、その「ヒットした...内容-」行は出力しないでください。
 これ以外の内容は絶対に追加しないでください。"""
 
+# ==================== 情報チェックAI実行 ====================
 def run_information_check_ai(file_bytes, filename, user_message, check_items):
     """提出物を情報チェックAIに送り、固定フォーマットの分析結果だけを返す。"""
     prompt = build_information_check_prompt(check_items)
-    content = []
+    
+    # プロンプトをシステムメッセージとして設定
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": f"以下のファイルとメッセージを分析して、固定フォーマットで出力してください。"}
+    ]
+    
+    # ユーザーメッセージを追加
+    user_content = ""
     if user_message:
-        content.append({"type": "text", "text": "【メッセージ】\n" + user_message})
-
+        user_content += f"【メッセージ】\n{user_message}\n\n"
+    
     if file_bytes and filename:
+        user_content += f"【ファイル: {filename}】\n"
         mime = get_mime_type(filename)
-        if is_image_mime(mime) and st.session_state.selected_provider == "OpenAI":
-            data_url = build_data_url(file_bytes, mime)
-            content.append({"type": "image_url", "image_url": {"url": data_url}})
-        else:
-            # 汎用AI向けには、テキスト系ファイルは本文を渡す。
-            # バイナリ文書はOpenAI専用のファイル送信経路を利用する。
-            if mime.startswith("text/") or filename.lower().endswith(
-                (".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")
-            ):
+        
+        # テキストファイルの場合は内容を抽出
+        if mime.startswith("text/") or filename.lower().endswith((".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")):
+            try:
                 decoded = file_bytes.decode("utf-8", errors="ignore")
-                content.append({"type": "text", "text": f"【ファイル: {filename}】\n{decoded}"})
-            elif st.session_state.selected_provider == "OpenAI":
-                # OpenAIでは実ファイルをFiles API/Responses APIへ渡すため、
-                # ここでは専用関数を使う。
-                analysis_messages = [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": "提出したファイルとメッセージを分析してください。\n" + (user_message or "")}
-                ]
-                return call_openai_with_file(
-                    analysis_messages,
+                user_content += decoded[:5000]
+            except:
+                user_content += f"（バイナリファイル: {len(file_bytes)}バイト）"
+        else:
+            # Word, PDFなどのバイナリファイルはDeepSeekのファイルアップロード機能を使用
+            provider = st.session_state.selected_provider
+            provider_config = AI_PROVIDERS.get(provider, {})
+            
+            if provider_config.get("supports_file_upload", False):
+                # ファイルアップロード対応プロバイダーの場合はファイルを添付
+                return call_ai_with_file_upload(
+                    messages,
                     file_bytes=file_bytes,
                     filename=filename,
                     mime_type=mime,
-                    max_tokens=500
+                    max_tokens=500,
+                    is_information_check=True
                 )
             else:
-                content.append({"type": "text", "text": f"【ファイル: {filename}】\nファイル名と形式を確認してください。内容の推測は禁止します。"})
-
-    if not content:
-        content = [{"type": "text", "text": "提出物はありません。"}]
-
-    # OpenAI Responses API以外の既存Chat Completionsにも対応。
-    if st.session_state.selected_provider == "OpenAI":
-        messages = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": content}
-        ]
-        return call_ai_api(messages, max_tokens=500)
-
-    messages = [
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": content if len(content) > 1 else content[0]["text"]}
-    ]
+                user_content += f"（バイナリファイル: {filename}, サイズ: {len(file_bytes)}バイト）"
+    
+    if user_content:
+        messages.append({"role": "user", "content": user_content})
+    else:
+        messages.append({"role": "user", "content": "分析する内容がありません。"})
+    
     return call_ai_api(messages, max_tokens=500)
 
-# ==================== DDS送信関数 ====================
-def send_detection_request(file_obj, source_type, dds_url, verify_ssl, data_type="DIM", content_block_id=None, mime_type=None):
+# ==================== AIファイルアップロード対応 ====================
+def call_ai_with_file_upload(messages, file_bytes=None, filename=None, mime_type=None, max_tokens=200, is_information_check=False):
+    """ファイルアップロードに対応したAI APIを呼び出す（DeepSeek / OpenAI）"""
     start_time = time.time()
     
     try:
-        file_obj.seek(0)
-        file_bytes = file_obj.read()
-        b64_data = base64.b64encode(file_bytes).decode('utf-8')
+        provider = st.session_state.selected_provider
+        provider_config = AI_PROVIDERS.get(provider, {})
         
-        if source_type == "file":
-            file_mime = get_mime_type(file_obj.name)
-            if file_obj.type and file_obj.type != 'application/octet-stream':
-                file_mime = file_obj.type
-            
-            block_id = file_obj.name.replace('.', '-') + "-001"
-            
-            request_data = {
-                "context": [
-                    {"name": "common.dataType", "value": ["DIM"]},
-                    {"name": "common.application", "value": [st.session_state.get("dlp_application", "securlet.box")]},
-                    {"name": "common.transactionId", "value": [st.session_state.txid]},
-                    {"name": "common.filter", "value": [f["id"] for f in st.session_state.filters]},
-                    {"name": "common.expectActionsAck", "value": ["true"]},
-                    {"name": "client.domain", "value": [st.session_state.get("client_domain", "")]},
-                    {"name": "client.user.id", "value": [st.session_state.get("client_user", "")]}
-                ],
-                "subject": {
-                    "contentBlockId": "subject-001",
-                    "mimeType": "text/plain",
-                    "data": base64.b64encode(f"ファイル: {file_obj.name}".encode('utf-8')).decode('utf-8')
-                },
-                "attachments": [
-                    {
-                        "contentBlockId": block_id,
-                        "mimeType": file_mime,
-                        "data": b64_data,
-                        "name": file_obj.name
-                    }
-                ]
-            }
-            
-        else:
-            block_id = content_block_id or "message-001"
-            mime = mime_type or "text/plain"
-            
-            request_data = {
-                "context": [
-                    {"name": "common.dataType", "value": [data_type]},
-                    {"name": "common.application", "value": [st.session_state.get("dlp_application", "securlet.box")]},
-                    {"name": "common.transactionId", "value": [st.session_state.txid]},
-                    {"name": "common.filter", "value": [f["id"] for f in st.session_state.filters]},
-                    {"name": "common.expectActionsAck", "value": ["true"]},
-                    {"name": "client.domain", "value": [st.session_state.get("client_domain", "")]},
-                    {"name": "client.user.id", "value": [st.session_state.get("client_user", "")]}
-                ],
-                "subject": {
-                    "contentBlockId": block_id,
-                    "mimeType": "text/plain",
-                    "data": b64_data
-                }
-            }
+        if not provider_config.get("supports_file_upload", False):
+            # ファイルアップロード非対応の場合は通常のAPI呼び出しにフォールバック
+            return call_ai_api(messages, max_tokens)
         
-        json_data = json.dumps(request_data, ensure_ascii=False)
+        api_key = st.session_state.ai_api_key
+        api_url = normalize_api_url(st.session_state.ai_api_url)
+        model_name = st.session_state.ai_model
+        
+        if not api_key or not model_name:
+            st.error("API Keyまたはモデルが設定されていません。")
+            return None, time.time() - start_time
         
         headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Authorization": f"Bearer {api_key}",
         }
         
-        response = requests.post(
-            dds_url,
-            data=json_data,
-            headers=headers,
-            verify=not verify_ssl,
-            timeout=60
-        )
-        
-        elapsed = time.time() - start_time
-        
-        try:
-            response_json = response.json()
-            
-            if response.status_code == 201:
-                violations = response_json.get("violation", [])
-                if violations is None:
-                    violations = []
-                request_id = response_json.get("requestId")
-                return violations, request_id, response_json, None, elapsed
-            else:
-                error_info = {
-                    "status_code": response.status_code,
-                    "response_text": response.text,
-                    "headers": dict(response.headers)
-                }
-                return [], None, None, error_info, elapsed
-                
-        except Exception as e:
-            error_info = {
-                "status_code": response.status_code,
-                "response_text": response.text,
-                "error": str(e)
+        # DeepSeekのファイルアップロードAPI
+        if provider == "DeepSeek":
+            # 1. ファイルをアップロード
+            upload_url = "https://api.deepseek.com/v1/files"
+            files = {
+                "file": (filename, file_bytes, mime_type or get_mime_type(filename)),
+                "purpose": (None, "assistants")  # DeepSeekでは"assistants"目的を使用
             }
-            return [], None, None, error_info, elapsed
             
-    except requests.exceptions.ConnectionError as e:
-        error_info = {
-            "error_type": "ConnectionError",
-            "message": str(e),
-            "dds_url": dds_url
-        }
-        return [], None, None, error_info, time.time() - start_time
-    except requests.exceptions.Timeout as e:
-        error_info = {
-            "error_type": "Timeout",
-            "message": str(e)
-        }
-        return [], None, None, error_info, time.time() - start_time
+            upload_response = requests.post(
+                upload_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                files=files,
+                timeout=120
+            )
+            
+            if upload_response.status_code not in (200, 201):
+                st.error(f"DeepSeekファイルアップロードエラー: {upload_response.status_code} - {upload_response.text}")
+                return None, time.time() - start_time
+            
+            file_info = upload_response.json()
+            file_id = file_info.get("id")
+            
+            if not file_id:
+                st.error("DeepSeekからfile_idを取得できませんでした。")
+                return None, time.time() - start_time
+            
+            # 2. ファイルIDを使ってチャット完了リクエスト
+            chat_url = normalize_api_url(api_url)
+            headers["Content-Type"] = "application/json"
+            
+            # メッセージを構築（ファイル参照を含む）
+            chat_messages = []
+            for msg in messages:
+                chat_messages.append(msg)
+            
+            # ファイル参照を追加
+            if is_information_check:
+                # 情報チェック用のプロンプトは既にシステムメッセージに含まれている
+                chat_messages.append({
+                    "role": "user",
+                    "content": f"添付ファイル {filename} を分析し、指定されたフォーマットで出力してください。"
+                })
+            else:
+                # 通常のチャット用
+                chat_messages.append({
+                    "role": "user",
+                    "content": f"添付ファイル {filename} を参照して回答してください。"
+                })
+            
+            # DeepSeekのファイル参照フォーマット
+            # DeepSeekはfile_idsパラメータをサポート
+            payload = {
+                "model": model_name,
+                "messages": chat_messages,
+                "file_ids": [file_id],  # DeepSeekのファイル参照
+                "max_tokens": max_tokens,
+                "temperature": 0.7
+            }
+            
+            response = requests.post(
+                chat_url,
+                headers=headers,
+                json=payload,
+                timeout=120
+            )
+            
+            elapsed = time.time() - start_time
+            
+            if response.status_code == 200:
+                result = response.json()
+                if "choices" in result and len(result["choices"]) > 0:
+                    content = result["choices"][0].get("message", {}).get("content", "")
+                    return content, elapsed
+                else:
+                    return "（応答がありませんでした）", elapsed
+            else:
+                st.error(f"DeepSeek APIエラー: {response.status_code} - {response.text}")
+                return None, elapsed
+        
+        # OpenAIのファイルアップロード
+        elif provider == "OpenAI":
+            return call_openai_with_file(messages, file_bytes, filename, mime_type, max_tokens)
+        
+        else:
+            # その他のプロバイダーは通常のAPI呼び出し
+            return call_ai_api(messages, max_tokens)
+            
     except Exception as e:
-        error_info = {
-            "error_type": "Exception",
-            "message": str(e)
-        }
-        import traceback
-        error_info["traceback"] = traceback.format_exc()
-        return [], None, None, error_info, time.time() - start_time
+        st.error(f"ファイルアップロードエラー: {e}")
+        return None, time.time() - start_time
 
-# ==================== AIファイル送信ヘルパー ====================
-def is_image_mime(mime_type):
-    return bool(mime_type) and mime_type.lower().startswith("image/")
-
-
-def build_data_url(file_bytes, mime_type):
-    encoded = base64.b64encode(file_bytes).decode("utf-8")
-    return f"data:{mime_type};base64,{encoded}"
-
-
+# ==================== OpenAIファイル送信 ====================
 def call_openai_with_file(messages, file_bytes=None, filename=None, mime_type=None, max_tokens=200):
-    """OpenAI Responses APIへ実ファイルを送信する。
-
-    画像: input_image + data URL
-    その他: Files APIへアップロードして input_file で参照
-    """
+    """OpenAI Responses APIへ実ファイルを送信する。"""
     start_time = time.time()
     try:
         api_key = st.session_state.ai_api_key
@@ -511,7 +476,6 @@ def call_openai_with_file(messages, file_bytes=None, filename=None, mime_type=No
             "Content-Type": "application/json"
         }
 
-        # 会話履歴をResponses APIのinput形式へ変換
         input_items = []
         for msg in messages:
             role = msg.get("role", "user")
@@ -521,7 +485,6 @@ def call_openai_with_file(messages, file_bytes=None, filename=None, mime_type=No
                 "content": [{"type": "input_text", "text": str(content)}]
             })
 
-        # 現在のファイルを実データとして添付
         if file_bytes is not None and filename:
             mime = mime_type or get_mime_type(filename)
             if is_image_mime(mime):
@@ -534,7 +497,7 @@ def call_openai_with_file(messages, file_bytes=None, filename=None, mime_type=No
                     ]
                 })
             else:
-                # OpenAI Files APIへ元ファイルをアップロード
+                # OpenAI Files APIへアップロード
                 upload_headers = {"Authorization": f"Bearer {api_key}"}
                 files = {
                     "file": (filename, file_bytes, mime)
@@ -587,7 +550,6 @@ def call_openai_with_file(messages, file_bytes=None, filename=None, mime_type=No
         if output_text:
             return output_text, elapsed
 
-        # output_textがない場合の互換的な抽出
         texts = []
         for item in result.get("output", []):
             for content in item.get("content", []):
@@ -628,12 +590,12 @@ def call_ai_api(messages, max_tokens=200):
         model_name = st.session_state.ai_model
         
         if not api_url or not model_name:
-            st.error("AI設定が不完全です。プロバイダーとモデルを選択してください。")
+            st.error("AI設定が不完全です。")
             return None, time.time() - start_time
         
         provider = st.session_state.selected_provider
         if provider in AI_PROVIDERS and AI_PROVIDERS[provider].get("api_key_required", True) and not api_key:
-            st.error(f"{provider}はAPI Keyが必須です。API Keyを入力してください。")
+            st.error(f"{provider}はAPI Keyが必須です。")
             return None, time.time() - start_time
         
         headers = {
@@ -649,12 +611,24 @@ def call_ai_api(messages, max_tokens=200):
             "stream": False
         }
         
+        if st.session_state.debug_mode:
+            add_debug_log("AIリクエスト", f"AI API呼び出し (モデル: {model_name})", "info", 0, {
+                "url": api_url,
+                "model": model_name,
+                "messages": messages
+            })
+        
         response = requests.post(api_url, headers=headers, json=data, timeout=60)
         
         elapsed = time.time() - start_time
         
         if response.status_code == 200:
             result = response.json()
+            
+            if st.session_state.debug_mode:
+                add_debug_log("AIレスポンス", f"AI API応答受信", "success", elapsed, {
+                    "response": result
+                })
             
             content = None
             reasoning = None
@@ -697,6 +671,144 @@ def call_ai_api(messages, max_tokens=200):
         st.error(f"AI API呼び出しエラー: {e}")
         return None, time.time() - start_time
 
+# ==================== DDS送信関数 ====================
+def send_detection_request(file_obj, source_type, dds_url, verify_ssl, data_type="DIM", content_block_id=None, mime_type=None):
+    start_time = time.time()
+    
+    try:
+        file_obj.seek(0)
+        file_bytes = file_obj.read()
+        b64_data = base64.b64encode(file_bytes).decode('utf-8')
+        
+        context = [
+            {"name": "common.dataType", "value": [data_type]},
+            {"name": "common.application", "value": [st.session_state.get("dlp_application", "securlet.box")]},
+            {"name": "common.transactionId", "value": [st.session_state.txid]},
+            {"name": "common.filter", "value": [f["id"] for f in st.session_state.filters]},
+            {"name": "common.expectActionsAck", "value": ["true"]},
+        ]
+        
+        if st.session_state.get("client_domain"):
+            context.append({"name": "client.domain", "value": [st.session_state.client_domain]})
+        if st.session_state.get("client_user"):
+            context.append({"name": "client.user.id", "value": [st.session_state.client_user]})
+        
+        if source_type == "file":
+            file_mime = get_mime_type(file_obj.name)
+            if hasattr(file_obj, 'type') and file_obj.type and file_obj.type != 'application/octet-stream':
+                file_mime = file_obj.type
+            
+            block_id = re.sub(r'[^a-zA-Z0-9-]', '-', file_obj.name) + "-001"
+            
+            request_data = {
+                "context": context,
+                "subject": {
+                    "contentBlockId": "subject-001",
+                    "mimeType": "text/plain",
+                    "data": base64.b64encode(f"ファイル: {file_obj.name}".encode('utf-8')).decode('utf-8')
+                },
+                "attachments": [
+                    {
+                        "contentBlockId": block_id,
+                        "mimeType": file_mime,
+                        "data": b64_data,
+                        "name": file_obj.name
+                    }
+                ]
+            }
+            
+        else:
+            block_id = content_block_id or "message-001"
+            mime = mime_type or "text/plain"
+            
+            request_data = {
+                "context": context,
+                "subject": {
+                    "contentBlockId": block_id,
+                    "mimeType": "text/plain",
+                    "data": b64_data
+                }
+            }
+        
+        json_data = json.dumps(request_data, ensure_ascii=False)
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        if st.session_state.debug_mode:
+            add_debug_log("DDSリクエスト", f"リクエスト送信 (タイプ: {source_type})", "info", 0, {
+                "url": dds_url,
+                "source_type": source_type,
+                "data_type": data_type,
+                "request_data": request_data
+            })
+        
+        response = requests.post(
+            dds_url,
+            data=json_data,
+            headers=headers,
+            verify=not verify_ssl,
+            timeout=60
+        )
+        
+        elapsed = time.time() - start_time
+        
+        try:
+            response_json = response.json()
+            
+            if st.session_state.debug_mode:
+                add_debug_log("DDSレスポンス", f"ステータス: {response.status_code}", 
+                             "success" if response.status_code == 201 else "error", elapsed, {
+                                "status_code": response.status_code,
+                                "response": response_json
+                            })
+            
+            if response.status_code == 201:
+                violations = response_json.get("violation", [])
+                if violations is None:
+                    violations = []
+                request_id = response_json.get("requestId")
+                return violations, request_id, response_json, None, elapsed
+            else:
+                error_info = {
+                    "status_code": response.status_code,
+                    "response_text": response.text,
+                    "headers": dict(response.headers)
+                }
+                return [], None, None, error_info, elapsed
+                
+        except Exception as e:
+            error_info = {
+                "status_code": response.status_code,
+                "response_text": response.text,
+                "error": str(e)
+            }
+            return [], None, None, error_info, elapsed
+            
+    except requests.exceptions.ConnectionError as e:
+        error_info = {
+            "error_type": "ConnectionError",
+            "message": str(e),
+            "dds_url": dds_url
+        }
+        return [], None, None, error_info, time.time() - start_time
+    except requests.exceptions.Timeout as e:
+        error_info = {
+            "error_type": "Timeout",
+            "message": str(e)
+        }
+        return [], None, None, error_info, time.time() - start_time
+    except Exception as e:
+        error_info = {
+            "error_type": "Exception",
+            "message": str(e)
+        }
+        import traceback
+        error_info["traceback"] = traceback.format_exc()
+        return [], None, None, error_info, time.time() - start_time
+
 # ==================== MessageWrapperクラス ====================
 class MessageWrapper:
     def __init__(self, content, name):
@@ -708,6 +820,41 @@ class MessageWrapper:
         return self.content.encode('utf-8')
     def seek(self, pos):
         pass
+
+class BytesWrapper:
+    def __init__(self, data, name, mime_type="application/octet-stream"):
+        self.data = data
+        self.name = name
+        self.type = mime_type
+        self.size = len(data)
+    def read(self):
+        return self.data
+    def seek(self, pos):
+        pass
+
+# ==================== コンテンツ取得関数 ====================
+def get_content_for_dds(file_data, filename, user_message, send_target):
+    content = ""
+    if send_target in ["message", "both"] and user_message:
+        content += f"【メッセージ】\n{user_message}\n"
+    if send_target in ["file", "both"] and file_data and filename:
+        content += f"【ファイル: {filename}】\n"
+        mime = get_mime_type(filename)
+        if mime.startswith("text/") or filename.lower().endswith((".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")):
+            try:
+                decoded = file_data.decode("utf-8", errors="ignore")
+                content += decoded[:5000]
+            except:
+                content += f"（バイナリファイル: {len(file_data)}バイト）"
+        else:
+            content += f"（バイナリファイル: {len(file_data)}バイト）"
+    return content
+
+def get_file_wrapper(file_data, filename, send_target):
+    if send_target in ["file", "both"] and file_data and filename:
+        mime = get_mime_type(filename)
+        return BytesWrapper(file_data, filename, mime)
+    return None
 
 # ==================== サイドバー設定 ====================
 with st.sidebar:
@@ -733,6 +880,29 @@ with st.sidebar:
     st.session_state.client_domain = client_domain
     st.session_state.client_user = client_user
     st.session_state.dlp_application = dlp_application
+
+    st.divider()
+
+    # モード選択
+    st.subheader("🔄 動作モード")
+    operation_mode = st.radio(
+        "モード選択",
+        ["Monitor", "Inline"],
+        index=0 if st.session_state.operation_mode == "Monitor" else 1,
+        horizontal=True
+    )
+    st.session_state.operation_mode = operation_mode
+    
+    # 送信ターゲット選択
+    st.subheader("📤 送信ターゲット")
+    send_target = st.radio(
+        "送信内容",
+        ["ファイルのみ", "メッセージのみ", "両方"],
+        index=2,
+        horizontal=True
+    )
+    target_map = {"ファイルのみ": "file", "メッセージのみ": "message", "両方": "both"}
+    st.session_state.send_target = target_map[send_target]
 
     st.divider()
 
@@ -790,6 +960,10 @@ with st.sidebar:
     provider_config = AI_PROVIDERS[selected_provider]
     st.caption(f"📌 {provider_config.get('description', '')}")
     
+    # ファイルアップロード対応の表示
+    if provider_config.get("supports_file_upload", False):
+        st.info("📎 ファイルアップロード対応")
+    
     st.session_state.ai_api_url = provider_config["url"]
     st.info(f"📡 API URL: {provider_config['url']}")
     
@@ -837,22 +1011,14 @@ with st.sidebar:
     st.subheader("🐛 デバッグ設定")
     debug_mode = st.checkbox(
         "デバッグモードを有効にする",
-        value=st.session_state.debug_mode,
-        help="チェックを入れると、DDSリクエストとレスポンスの詳細が表示されます"
+        value=st.session_state.debug_mode
     )
     st.session_state.debug_mode = debug_mode
     
-    if debug_mode:
-        st.info("🔍 デバッグモード: ON")
-    else:
-        st.info("🔍 デバッグモード: OFF")
-    
-    # デバッグパネル表示切り替え
     if st.session_state.debug_logs:
         show_panel = st.checkbox(
             "📋 デバッグパネルを表示",
-            value=st.session_state.get("show_debug_panel", True),
-            help="チェックを入れると右側にデバッグログパネルが表示されます"
+            value=st.session_state.get("show_debug_panel", True)
         )
         st.session_state.show_debug_panel = show_panel
     else:
@@ -863,9 +1029,6 @@ with st.sidebar:
     # 接続テスト
     if st.button("🔗 AI接続テスト", use_container_width=True):
         if st.session_state.ai_api_url and st.session_state.ai_model:
-            normalized_url = normalize_api_url(st.session_state.ai_api_url)
-            st.info(f"📌 正規化されたURL: {normalized_url}")
-            
             test_result, elapsed = call_ai_api([
                 {"role": "user", "content": "Hello, this is a test. Please respond with 'OK'."}
             ], max_tokens=10)
@@ -896,7 +1059,7 @@ with st.sidebar:
             )
             st.caption(f"📌 {f.get('name', '')}")
         with cols[1]:
-            if st.button("🗑️", key=f"remove_filter_{i}", help="このフィルターを削除"):
+            if st.button("🗑️", key=f"remove_filter_{i}"):
                 filters_to_remove.append(i)
     
     for idx in sorted(filters_to_remove, reverse=True):
@@ -937,10 +1100,11 @@ else:
 
 # ==================== メインコンテンツ ====================
 with main_col:
-    # ログ件数インジケーター
     if st.session_state.debug_logs:
-        log_count = len(st.session_state.debug_logs)
-        st.info(f"📋 デバッグログ: {log_count}件 (右パネルで表示)")
+        st.info(f"📋 デバッグログ: {len(st.session_state.debug_logs)}件")
+    
+    mode_color = "🟢" if st.session_state.operation_mode == "Monitor" else "🔵"
+    st.caption(f"{mode_color} 現在のモード: **{st.session_state.operation_mode}** | 送信ターゲット: **{send_target}**")
     
     # チャット履歴表示
     chat_container = st.container()
@@ -951,10 +1115,9 @@ with main_col:
                 if "violations" in message and message["violations"]:
                     st.error(f"🚫 ポリシー違反: {', '.join([v['name'] for v in message['violations']])}")
 
-    # ==================== ファイルアップロードエリア ====================
+    # ファイルアップロード
     st.subheader("📎 ファイルアップロード")
-    st.caption("ファイルを選択すると自動的にDDSで検査を実行します")
-
+    
     uploaded_file = st.file_uploader(
         "ファイル選択",
         type=[".txt", ".csv", ".log", ".doc", ".docx", ".xls", ".xlsx", 
@@ -983,24 +1146,22 @@ with main_col:
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.info(f"📎 ファイル: {st.session_state.filename}")
+            st.info(f"📎 {st.session_state.filename}")
         with col2:
-            st.info(f"📊 サイズ: {len(st.session_state.file_data)/1024:.1f} KB")
+            st.info(f"📊 {len(st.session_state.file_data)/1024:.1f} KB")
         with col3:
-            st.info(f"📝 MIME: {file_mime}")
+            st.info(f"📝 {file_mime}")
         with col4:
             ext = st.session_state.filename.split('.')[-1].upper() if '.' in st.session_state.filename else "不明"
-            st.info(f"📄 形式: {ext}")
+            st.info(f"📄 {ext}")
         
-        # 画像ファイルのプレビュー
         if file_mime and file_mime.startswith('image/'):
             try:
                 image = Image.open(io.BytesIO(st.session_state.file_data))
                 st.image(image, caption=f"画像プレビュー: {st.session_state.filename}", width=300)
-            except Exception as e:
-                st.warning(f"画像のプレビュー表示に失敗しました: {e}")
+            except:
+                pass
         
-        # テキストファイルのプレビュー
         elif file_mime and "text" in file_mime:
             try:
                 content = st.session_state.file_data.decode('utf-8', errors='ignore')
@@ -1009,216 +1170,109 @@ with main_col:
                     st.caption(f"... 他 {len(content) - 1000} 文字")
             except:
                 pass
-        
-        if not st.session_state.file_checked:
-            with st.spinner(f"🔍 DDSでファイルを検査中... (ファイル: {st.session_state.filename})"):
-                progress_bar = st.progress(0)
-                for i in range(100):
-                    time.sleep(0.02)
-                    progress_bar.progress(i + 1)
-                progress_bar.empty()
-                
-                class FileWrapper:
-                    def __init__(self, name, data):
-                        self.name = name
-                        self.data = data
-                        self.type = get_mime_type(name)
-                    def read(self):
-                        return self.data
-                    def seek(self, pos):
-                        pass
-                
-                file_wrapper = FileWrapper(st.session_state.filename, st.session_state.file_data)
-                violations, request_id, response_data, error_info, elapsed = send_detection_request(
-                    file_wrapper, 
-                    "file", 
-                    st.session_state.dds_url, 
-                    st.session_state.verify_ssl,
-                    data_type="DIM"
-                )
-                
-                st.session_state.file_violations = violations
-                st.session_state.file_checked = True
-                
-                if st.session_state.debug_mode:
-                    if violations and len(violations) > 0:
-                        policy_names = [v["name"] for v in violations]
-                        add_debug_log("ファイル検査", f"ポリシー違反: {', '.join(policy_names)}", "warning", elapsed, response_data)
-                    else:
-                        add_debug_log("ファイル検査", "ポリシー違反はありません", "success", elapsed, response_data)
-                
-                if error_info:
-                    if not st.session_state.debug_mode:
-                        st.error(f"❌ DDSエラー: ステータスコード {error_info.get('status_code', '不明')}")
-                    else:
-                        st.error(f"❌ DDSエラー: {error_info}")
-                elif violations and len(violations) > 0:
-                    st.session_state.file_approved = False
-                    policy_names = [v["name"] for v in violations]
-                    st.error(f"🚫 ポリシー違反: {', '.join(policy_names)}")
-                    st.warning("⚠️ このファイルはポリシーに違反しているため、AIに送信できません")
-                else:
-                    st.session_state.file_approved = True
-                    st.success(f"✅ ファイル検査完了: ポリシー違反はありません (⏱️ {elapsed:.2f}秒)")
-                    if request_id and st.session_state.debug_mode:
-                        st.info(f"📌 Request ID: {request_id}")
-                    st.info("💬 メッセージを入力して送信すると、このファイルが添付されてAIに送信されます")
-        
-        else:
-            if st.session_state.file_violations and len(st.session_state.file_violations) > 0:
-                policy_names = [v["name"] for v in st.session_state.file_violations]
-                st.error(f"🚫 ポリシー違反: {', '.join(policy_names)}")
-                st.warning("⚠️ このファイルはポリシーに違反しているため、AIに送信できません")
-            else:
-                st.success("✅ ファイルは検査済み: ポリシー違反はありません")
-                st.info("💬 メッセージを入力して送信すると、このファイルが添付されてAIに送信されます")
 
-    # ==================== メッセージ入力エリア ====================
     st.divider()
 
-    if uploaded_file and st.session_state.file_approved and not st.session_state.file_violations:
-        placeholder_text = "ファイルがアップロードされています。何を聞きたいですか？"
-    elif uploaded_file and st.session_state.file_violations:
-        placeholder_text = "ファイルがポリシー違反のため、メッセージのみ送信できます"
-    else:
-        placeholder_text = "メッセージを入力してください..."
+    user_input = st.chat_input("メッセージを入力してください...")
 
-    user_input = st.chat_input(placeholder_text)
-
-    # ==================== メッセージ処理 ====================
+    # ==================== 送信処理 ====================
     if user_input:
         st.session_state.process_start_time = time.time()
         
         with st.chat_message("user"):
             st.write(user_input)
-            if uploaded_file and st.session_state.file_approved and not st.session_state.file_violations:
-                st.write(f"📎 {st.session_state.filename} (添付済み)")
+            if uploaded_file:
+                st.write(f"📎 {st.session_state.filename}")
         
-        # ===== ステップ1: DDSチェック（メッセージ） =====
-        step1_start = time.time()
-        add_debug_log("ステップ1", "DDSでメッセージを検査中...", "info")
+        file_data = st.session_state.file_data if uploaded_file else None
+        filename = st.session_state.filename if uploaded_file else None
+        send_target = st.session_state.send_target
         
-        status_message = st.info("🔍 [ステップ1] DDSでメッセージを検査中...")
-        
-        message_wrapper = MessageWrapper(user_input, "message")
-        violations, request_id, response_data, error_info, elapsed = send_detection_request(
-            message_wrapper, 
-            "message", 
-            st.session_state.dds_url, 
-            st.session_state.verify_ssl,
-            data_type="DIM",
-            content_block_id="message-001"
-        )
-        
-        if violations is None:
-            violations = []
-        
-        status_message.empty()
-        st.info(f"✅ [ステップ1] DDSメッセージ検査完了 (⏱️ {elapsed:.2f}秒)")
-        add_debug_log("ステップ1", f"DDSメッセージ検査完了", "success", elapsed, response_data)
-        
-        if error_info:
-            st.error(f"❌ DDSエラー: ステータスコード {error_info.get('status_code', '不明')}")
-            add_debug_log("ステップ1", f"エラー: {error_info}", "error", elapsed)
+        if send_target == "message" and not user_input:
+            st.error("❌ メッセージが入力されていません")
+            st.stop()
+        if send_target == "file" and not file_data:
+            st.error("❌ ファイルがアップロードされていません")
+            st.stop()
+        if send_target == "both" and not user_input and not file_data:
+            st.error("❌ メッセージとファイルの両方がありません")
             st.stop()
         
-        if response_data and not st.session_state.debug_mode:
-            if response_data.get("violation") and len(response_data.get("violation", [])) > 0:
-                st.warning(f"⚠️ {len(response_data.get('violation', []))}件の違反が検出されました")
-        
-        if violations and len(violations) > 0:
-            policy_names = [v["name"] for v in violations]
-            st.error(f"🚫 ポリシー違反が検出されました: {', '.join(policy_names)}")
-            add_debug_log("ステップ1", f"ポリシー違反: {', '.join(policy_names)}", "warning", elapsed)
+        # ==================== Monitorモード ====================
+        if st.session_state.operation_mode == "Monitor":
+            st.info(f"📊 **Monitorモード**で実行します")
             
-            error_msg = f"🚫 以下のポリシーに違反しています: {', '.join(policy_names)}"
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": error_msg,
-                "violations": violations
-            })
+            # ---- ステップ1: DDSに送信 ----
+            step1_start = time.time()
+            add_debug_log("Monitor-ステップ1", "DDSに内容を送信して検査中...", "info")
+            status1 = st.info("🔍 [Monitor-1] DDSに内容を送信して検査中...")
             
-            with st.chat_message("assistant"):
-                st.error(error_msg)
+            content_for_dds = get_content_for_dds(file_data, filename, user_input, send_target)
+            if not content_for_dds.strip():
+                st.error("❌ 送信するコンテンツがありません")
+                st.stop()
             
-            st.rerun()
-            st.stop()
-        else:
-            st.success("✅ [ステップ1] ポリシー違反はありませんでした")
-            add_debug_log("ステップ1", "ポリシー違反はありませんでした", "success", elapsed)
-        
-        # ===== 情報チェックAI分析 =====
-        info_items_enabled = [
-            x for x in st.session_state.info_check_items if x.get("enabled")
-        ]
-        if info_items_enabled:
-            add_debug_log("情報チェックAI", "提出内容を固定フォーマットで分析中...", "info")
-            info_start = time.time()
-
-            info_file_bytes = None
-            info_filename = None
-            if uploaded_file and st.session_state.file_data:
-                info_file_bytes = st.session_state.file_data
-                info_filename = st.session_state.filename
-
-            info_result, info_elapsed = run_information_check_ai(
-                info_file_bytes,
-                info_filename,
-                user_input,
-                info_items_enabled
+            content_wrapper = MessageWrapper(content_for_dds, "content")
+            violations, request_id, response_data, error_info, elapsed1 = send_detection_request(
+                content_wrapper,
+                "message",
+                st.session_state.dds_url,
+                st.session_state.verify_ssl,
+                data_type="DIM",
+                content_block_id="content-001"
             )
-
-            if info_result:
-                # AIの固定フォーマット以外の前置き/Markdownを除去せず、
-                # AIに「それ以外を出さない」と明示した結果をそのまま記録する。
-                add_debug_log(
-                    "情報チェックAI",
-                    "固定フォーマット分析完了",
-                    "success",
-                    info_elapsed,
-                    {
-                        "check_items": [x["name"] for x in info_items_enabled],
-                        "request_instruction": build_information_check_prompt(info_items_enabled),
-                        "response": info_result
-                    }
-                )
-            else:
-                add_debug_log(
-                    "情報チェックAI",
-                    "分析結果を取得できませんでした",
-                    "error",
-                    info_elapsed
-                )
-
-        # ===== ステップ2: AI送信 =====
-        add_debug_log("ステップ2", "AIにリクエストを送信中...", "info")
-        st.info("🤖 [ステップ2] AIにリクエストを送信中...")
-        
-        file_to_send = None
-        filename_to_send = None
-        
-        if uploaded_file and st.session_state.file_approved and not st.session_state.file_violations:
-            file_to_send = st.session_state.file_data
-            filename_to_send = st.session_state.filename
-        
-        start_time = time.time()
-        status_placeholder = st.empty()
-        status_placeholder.info(f"⏳ AI応答を待っています... (0秒経過)")
-        
-        with st.spinner(f"🤖 {st.session_state.ai_model} に送信中..."):
-            def update_status():
-                elapsed = 0
-                while True:
-                    time.sleep(1)
-                    elapsed += 1
-                    status_placeholder.info(f"⏳ AI応答を待っています... ({elapsed}秒経過)")
-                    if elapsed > 10:
-                        status_placeholder.info(f"⏳ AI応答を待っています... ({elapsed}秒経過) 少々お待ちください")
-                    if elapsed > 30:
-                        status_placeholder.warning(f"⏳ AI応答を待っています... ({elapsed}秒経過) 応答に時間がかかっています")
             
-            status_thread = threading.Thread(target=update_status, daemon=True)
-            status_thread.start()
+            if violations is None:
+                violations = []
+            
+            status1.empty()
+            st.info(f"✅ [Monitor-1] DDS検査完了 (⏱️ {elapsed1:.2f}秒)")
+            add_debug_log("Monitor-ステップ1", f"DDS検査完了", "success", elapsed1, response_data)
+            
+            if error_info:
+                st.error(f"❌ DDSエラー: {error_info}")
+                add_debug_log("Monitor-ステップ1", f"エラー: {error_info}", "error", elapsed1)
+                st.stop()
+            
+            if violations and len(violations) > 0:
+                policy_names = [v["name"] for v in violations]
+                st.warning(f"⚠️ {len(violations)}件のポリシー違反: {', '.join(policy_names)}")
+                add_debug_log("Monitor-ステップ1", f"ポリシー違反: {', '.join(policy_names)}", "warning", elapsed1)
+            else:
+                st.success("✅ ポリシー違反はありませんでした")
+                add_debug_log("Monitor-ステップ1", "ポリシー違反なし", "success", elapsed1)
+            
+            # ---- 情報チェックAI分析 ----
+            info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
+            if info_items_enabled:
+                add_debug_log("Monitor-情報チェックAI", "情報チェックAIで分析中...", "info")
+                
+                info_result, info_elapsed = run_information_check_ai(
+                    file_data,
+                    filename,
+                    user_input,
+                    info_items_enabled
+                )
+                
+                if info_result:
+                    add_debug_log(
+                        "Monitor-情報チェックAI",
+                        "情報チェックAI分析完了",
+                        "success",
+                        info_elapsed,
+                        {
+                            "check_items": [x["name"] for x in info_items_enabled],
+                            "response": info_result
+                        }
+                    )
+                    with st.expander("🔎 情報チェックAI分析結果", expanded=False):
+                        st.code(info_result, language="text")
+                else:
+                    add_debug_log("Monitor-情報チェックAI", "分析結果を取得できませんでした", "error", info_elapsed)
+            
+            # ---- ステップ2: AIに送信 ----
+            add_debug_log("Monitor-ステップ2", "AIにリクエストを送信中...", "info")
+            st.info("🤖 [Monitor-2] AIにリクエストを送信中...")
             
             ai_messages = []
             for msg in st.session_state.messages:
@@ -1226,118 +1280,303 @@ with main_col:
                     ai_messages.append({"role": msg["role"], "content": msg["content"]})
             
             current_msg = user_input
+            if file_data and filename and send_target in ["file", "both"]:
+                current_msg += f"\n\n[添付ファイル: {filename}]"
+                mime = get_mime_type(filename)
+                if mime.startswith("text/") or filename.lower().endswith((".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")):
+                    try:
+                        decoded = file_data.decode("utf-8", errors="ignore")
+                        current_msg += f"\n\nファイル内容:\n{decoded[:3000]}"
+                    except:
+                        pass
+            
             ai_messages.append({"role": "user", "content": current_msg})
-
-            # OpenAIは実ファイルをFiles API / Responses APIへ送信する。
-            # その他のOpenAI互換APIは従来のChat Completionsを使用する。
-            if file_to_send and filename_to_send and st.session_state.selected_provider == "OpenAI":
-                file_mime = get_mime_type(filename_to_send)
-                ai_response, ai_elapsed = call_openai_with_file(
-                    ai_messages,
-                    file_bytes=file_to_send,
-                    filename=filename_to_send,
-                    mime_type=file_mime,
-                    max_tokens=200
-                )
-            else:
-                if file_to_send and filename_to_send:
-                    # 汎用Chat Completions APIでは任意バイナリを直接添付できないため、
-                    # 既存互換性を維持し、ファイル名とサイズのみを送信する。
-                    # 実ファイル送信が必要なプロバイダーは専用API実装が必要。
-                    ai_messages[-1]["content"] += f"\n[添付ファイル: {filename_to_send}, サイズ: {len(file_to_send)}バイト]"
-                ai_response, ai_elapsed = call_ai_api(ai_messages, max_tokens=200)
+            
+            start_time = time.time()
+            status_placeholder = st.empty()
+            status_placeholder.info(f"⏳ AI応答を待っています...")
+            
+            with st.spinner(f"🤖 {st.session_state.ai_model} に送信中..."):
+                provider = st.session_state.selected_provider
+                provider_config = AI_PROVIDERS.get(provider, {})
+                
+                if file_data and filename and provider_config.get("supports_file_upload", False):
+                    # ファイルアップロード対応プロバイダー
+                    ai_response, ai_elapsed = call_ai_with_file_upload(
+                        ai_messages,
+                        file_bytes=file_data,
+                        filename=filename,
+                        mime_type=get_mime_type(filename),
+                        max_tokens=200
+                    )
+                elif file_data and filename and st.session_state.selected_provider == "OpenAI":
+                    ai_response, ai_elapsed = call_openai_with_file(
+                        ai_messages,
+                        file_bytes=file_data,
+                        filename=filename,
+                        mime_type=get_mime_type(filename),
+                        max_tokens=200
+                    )
+                else:
+                    ai_response, ai_elapsed = call_ai_api(ai_messages, max_tokens=200)
             
             status_placeholder.empty()
             elapsed_time = time.time() - start_time
             
-            if ai_response:
-                st.success(f"✅ [ステップ2] AIからレスポンスを受信しました (⏱️ {ai_elapsed:.2f}秒)")
-                add_debug_log("ステップ2", f"AIからレスポンスを受信", "success", ai_elapsed)
+            if not ai_response:
+                st.error(f"❌ AIからの応答がありませんでした")
+                add_debug_log("Monitor-ステップ2", f"AI応答なし", "error", ai_elapsed if 'ai_elapsed' in locals() else 0)
+                st.stop()
+            
+            st.success(f"✅ [Monitor-2] AIからレスポンスを受信 (⏱️ {ai_elapsed:.2f}秒)")
+            add_debug_log("Monitor-ステップ2", f"AI応答受信", "success", ai_elapsed)
+            
+            # ---- ステップ3: AI応答をDDSに送信 ----
+            step3_start = time.time()
+            add_debug_log("Monitor-ステップ3", "AI応答をDDSに送信して再検査中...", "info")
+            st.info("🔍 [Monitor-3] AI応答をDDSに送信して再検査中...")
+            
+            ai_message_wrapper = MessageWrapper(ai_response, "ai_response")
+            v2, request_id2, response_data2, error_info2, elapsed3 = send_detection_request(
+                ai_message_wrapper,
+                "message",
+                st.session_state.dds_url,
+                st.session_state.verify_ssl,
+                data_type="DIM",
+                content_block_id="ai-response-001"
+            )
+            
+            if v2 is None:
+                v2 = []
+            
+            st.info(f"✅ [Monitor-3] DDS再検査完了 (⏱️ {elapsed3:.2f}秒)")
+            add_debug_log("Monitor-ステップ3", f"DDS再検査完了", "success", elapsed3, response_data2)
+            
+            if error_info2:
+                st.error(f"❌ DDSエラー: {error_info2}")
+                add_debug_log("Monitor-ステップ3", f"エラー: {error_info2}", "error", elapsed3)
+                st.stop()
+            
+            # ---- ステップ4: 結果表示 ----
+            if v2 and len(v2) > 0:
+                policy_names = [v["name"] for v in v2]
+                st.warning(f"⚠️ AI応答に{len(v2)}件のポリシー違反: {', '.join(policy_names)}")
+                add_debug_log("Monitor-ステップ4", f"AI応答にポリシー違反: {', '.join(policy_names)}", "warning", elapsed3)
                 
-                # ===== ステップ4: AI応答をDDSで再チェック =====
-                step4_start = time.time()
-                add_debug_log("ステップ4", "AIレスポンスをDDSに送信してDLP走査を実行中...", "info")
-                st.info("🔍 [ステップ4] AIレスポンスをDDSに送信してDLP走査を実行中...")
-                
-                ai_message_wrapper = MessageWrapper(ai_response, "ai_response")
-                v, request_id2, response_data2, error_info2, elapsed2 = send_detection_request(
-                    ai_message_wrapper,
-                    "message",
-                    st.session_state.dds_url,
-                    st.session_state.verify_ssl,
-                    data_type="DIM",
-                    content_block_id="ai-response-001"
-                )
-                
-                if v is None:
-                    v = []
-                
-                step4_elapsed = time.time() - step4_start
-                st.info(f"✅ [ステップ4] DLP走査が完了しました (⏱️ {elapsed2:.2f}秒)")
-                add_debug_log("ステップ4", f"DLP走査完了", "success", elapsed2, response_data2)
-                
-                if error_info2:
-                    st.error(f"❌ DDSエラー: ステータスコード {error_info2.get('status_code', '不明')}")
-                    add_debug_log("ステップ4", f"エラー: {error_info2}", "error", elapsed2)
-                    st.stop()
-                
-                # ===== ステップ5: AI応答の違反チェック結果 =====
-                if v and len(v) > 0:
-                    policy_names = [v["name"] for v in v]
-                    st.error(f"🚫 [ステップ5] AIレスポンスにポリシー違反が検出されました: {', '.join(policy_names)}")
-                    add_debug_log("ステップ5", f"ポリシー違反: {', '.join(policy_names)}", "warning", elapsed2)
-                    
-                    error_msg = f"🚫 AIの回答にDLP違反した内容がありました。表示できません。\n違反ポリシー: {', '.join(policy_names)}"
-                    
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": error_msg,
-                        "violations": v
-                    })
-                    
-                    with st.chat_message("assistant"):
-                        st.error(error_msg)
-                else:
-                    st.success("✅ [ステップ5] AIレスポンスにポリシー違反はありませんでした")
-                    add_debug_log("ステップ5", "ポリシー違反はありませんでした", "success", elapsed2)
-                    
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": ai_response,
-                        "violations": []
-                    })
-                    
-                    with st.chat_message("assistant"):
-                        st.write(ai_response)
-                        st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
-            else:
-                st.error(f"❌ [ステップ2] {st.session_state.ai_model} APIからの応答がありませんでした")
-                add_debug_log("ステップ2", f"{st.session_state.ai_model} APIからの応答なし", "error", ai_elapsed if 'ai_elapsed' in locals() else 0)
-                error_msg = f"❌ {st.session_state.ai_model} APIからの応答がありませんでした"
+                error_msg = f"⚠️ AIの回答にDLP違反が検出されました（違反: {', '.join(policy_names)}）\n\n---\n{ai_response}"
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": error_msg,
+                    "violations": v2
+                })
+                with st.chat_message("assistant"):
+                    st.warning(f"⚠️ AIの回答にDLP違反が検出されました")
+                    st.write(ai_response)
+                    st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
+            else:
+                st.success("✅ AI応答にポリシー違反はありません")
+                add_debug_log("Monitor-ステップ4", "AI応答にポリシー違反なし", "success", elapsed3)
+                
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": ai_response,
                     "violations": []
                 })
                 with st.chat_message("assistant"):
+                    st.write(ai_response)
+                    st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
+            
+            st.success(f"✅ **Monitorモード完了** (合計: {time.time() - st.session_state.process_start_time:.2f}秒)")
+            add_debug_log("Monitor-完了", f"全ての処理が完了しました", "success", time.time() - st.session_state.process_start_time)
+        
+        # ==================== Inlineモード ====================
+        else:
+            st.info(f"📊 **Inlineモード**で実行します")
+            
+            # ---- ステップ1: AIに送信 ----
+            add_debug_log("Inline-ステップ1", "AIにリクエストを送信中...", "info")
+            st.info("🤖 [Inline-1] AIにリクエストを送信中...")
+            
+            ai_messages = []
+            for msg in st.session_state.messages:
+                if msg["role"] != "assistant" or "violations" not in msg:
+                    ai_messages.append({"role": msg["role"], "content": msg["content"]})
+            
+            current_msg = user_input
+            if file_data and filename and send_target in ["file", "both"]:
+                current_msg += f"\n\n[添付ファイル: {filename}]"
+                mime = get_mime_type(filename)
+                if mime.startswith("text/") or filename.lower().endswith((".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")):
+                    try:
+                        decoded = file_data.decode("utf-8", errors="ignore")
+                        current_msg += f"\n\nファイル内容:\n{decoded[:3000]}"
+                    except:
+                        pass
+            
+            ai_messages.append({"role": "user", "content": current_msg})
+            
+            start_time = time.time()
+            status_placeholder = st.empty()
+            status_placeholder.info(f"⏳ AI応答を待っています...")
+            
+            with st.spinner(f"🤖 {st.session_state.ai_model} に送信中..."):
+                provider = st.session_state.selected_provider
+                provider_config = AI_PROVIDERS.get(provider, {})
+                
+                if file_data and filename and provider_config.get("supports_file_upload", False):
+                    ai_response, ai_elapsed = call_ai_with_file_upload(
+                        ai_messages,
+                        file_bytes=file_data,
+                        filename=filename,
+                        mime_type=get_mime_type(filename),
+                        max_tokens=200
+                    )
+                elif file_data and filename and st.session_state.selected_provider == "OpenAI":
+                    ai_response, ai_elapsed = call_openai_with_file(
+                        ai_messages,
+                        file_bytes=file_data,
+                        filename=filename,
+                        mime_type=get_mime_type(filename),
+                        max_tokens=200
+                    )
+                else:
+                    ai_response, ai_elapsed = call_ai_api(ai_messages, max_tokens=200)
+            
+            status_placeholder.empty()
+            elapsed_time = time.time() - start_time
+            
+            if not ai_response:
+                st.error(f"❌ AIからの応答がありませんでした")
+                add_debug_log("Inline-ステップ1", f"AI応答なし", "error", ai_elapsed if 'ai_elapsed' in locals() else 0)
+                st.stop()
+            
+            st.success(f"✅ [Inline-1] AIからレスポンスを受信 (⏱️ {ai_elapsed:.2f}秒)")
+            add_debug_log("Inline-ステップ1", f"AI応答受信", "success", ai_elapsed)
+            
+            # ---- ステップ2: AI応答をDDSに送信（結果非表示） ----
+            step2_start = time.time()
+            add_debug_log("Inline-ステップ2", "AI応答をDDSに送信（結果非表示）...", "info")
+            st.info("🔍 [Inline-2] AI応答をDDSに送信して検査中（結果は非表示）...")
+            
+            ai_message_wrapper = MessageWrapper(ai_response, "ai_response")
+            v2, request_id2, response_data2, error_info2, elapsed2 = send_detection_request(
+                ai_message_wrapper,
+                "message",
+                st.session_state.dds_url,
+                st.session_state.verify_ssl,
+                data_type="DIM",
+                content_block_id="ai-response-001"
+            )
+            
+            if v2 is None:
+                v2 = []
+            
+            if st.session_state.debug_mode:
+                add_debug_log("Inline-ステップ2", f"AI応答DDS検査完了 (違反: {len(v2)}件)", 
+                             "warning" if v2 else "success", elapsed2, response_data2)
+            
+            st.info(f"✅ [Inline-2] DDS検査完了 (⏱️ {elapsed2:.2f}秒)")
+            
+            # ---- 情報チェックAI分析 ----
+            info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
+            if info_items_enabled:
+                add_debug_log("Inline-情報チェックAI", "情報チェックAIで分析中...", "info")
+                
+                info_result, info_elapsed = run_information_check_ai(
+                    file_data,
+                    filename,
+                    user_input,
+                    info_items_enabled
+                )
+                
+                if info_result:
+                    add_debug_log(
+                        "Inline-情報チェックAI",
+                        "情報チェックAI分析完了",
+                        "success",
+                        info_elapsed,
+                        {
+                            "check_items": [x["name"] for x in info_items_enabled],
+                            "response": info_result
+                        }
+                    )
+            
+            # ---- ステップ3: 元の内容をDDSに送信 ----
+            step3_start = time.time()
+            add_debug_log("Inline-ステップ3", "元の内容をDDSに送信...", "info")
+            st.info("🔍 [Inline-3] 元の内容をDDSに送信して検査中...")
+            
+            content_for_dds = get_content_for_dds(file_data, filename, user_input, send_target)
+            if not content_for_dds.strip():
+                st.error("❌ 送信するコンテンツがありません")
+                st.stop()
+            
+            content_wrapper = MessageWrapper(content_for_dds, "content")
+            violations, request_id, response_data, error_info, elapsed3 = send_detection_request(
+                content_wrapper,
+                "message",
+                st.session_state.dds_url,
+                st.session_state.verify_ssl,
+                data_type="DIM",
+                content_block_id="content-001"
+            )
+            
+            if violations is None:
+                violations = []
+            
+            st.info(f"✅ [Inline-3] DDS検査完了 (⏱️ {elapsed3:.2f}秒)")
+            add_debug_log("Inline-ステップ3", f"元の内容DDS検査完了", "success", elapsed3, response_data)
+            
+            if error_info:
+                st.error(f"❌ DDSエラー: {error_info}")
+                add_debug_log("Inline-ステップ3", f"エラー: {error_info}", "error", elapsed3)
+                st.stop()
+            
+            # ---- ステップ4: 違反チェック ----
+            if violations and len(violations) > 0:
+                policy_names = [v["name"] for v in violations]
+                st.error(f"🚫 ポリシー違反が検出されました: {', '.join(policy_names)}")
+                st.error("❌ AIを継続で利用できません")
+                add_debug_log("Inline-ステップ4", f"ポリシー違反: {', '.join(policy_names)} - AI利用不可", "error", elapsed3)
+                
+                error_msg = f"🚫 ポリシー違反が検出されたため、AIを継続で利用できません。\n違反: {', '.join(policy_names)}"
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": error_msg,
+                    "violations": violations
+                })
+                with st.chat_message("assistant"):
                     st.error(error_msg)
+            else:
+                st.success("✅ ポリシー違反はありません - AI回答を表示")
+                add_debug_log("Inline-ステップ4", "ポリシー違反なし - AI回答を表示", "success", elapsed3)
+                
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": ai_response,
+                    "violations": []
+                })
+                with st.chat_message("assistant"):
+                    st.write(ai_response)
+                    st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
+            
+            st.success(f"✅ **Inlineモード完了** (合計: {time.time() - st.session_state.process_start_time:.2f}秒)")
+            add_debug_log("Inline-完了", f"全ての処理が完了しました", "success", time.time() - st.session_state.process_start_time)
         
         st.rerun()
 
-# ==================== デバッグパネル（右側） ====================
+# ==================== デバッグパネル ====================
 if show_debug and debug_col is not None:
     with debug_col:
         st.subheader("📋 デバッグログ")
         st.caption(f"🕐 最終更新: {datetime.now().strftime('%H:%M:%S')}")
         st.divider()
         
-        # ログクリアボタン（上部、一意のキー）
         if st.button("🗑️ ログクリア", key="clear_logs_top_btn", use_container_width=True):
             clear_debug_logs()
             st.rerun()
         
         st.divider()
         
-        # スクロール可能なログ表示
         with st.container(height=550):
             render_debug_logs()
