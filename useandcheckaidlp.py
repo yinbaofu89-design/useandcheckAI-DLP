@@ -25,6 +25,8 @@ st.caption("DDSでポリシー違反をチェック後、AI APIで応答を生�
 # ==================== 初期化 ====================
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "info_check_results" not in st.session_state:
+    st.session_state.info_check_results = []
 if "txid" not in st.session_state:
     st.session_state.txid = str(uuid.uuid4())
 if "filters" not in st.session_state:
@@ -70,6 +72,8 @@ if "operation_mode" not in st.session_state:
     st.session_state.operation_mode = "Monitor"
 if "send_target" not in st.session_state:
     st.session_state.send_target = "both"
+if "info_check_done" not in st.session_state:
+    st.session_state.info_check_done = False
 
 # 情報チェックリスト項目
 if "info_check_items" not in st.session_state:
@@ -90,7 +94,7 @@ AI_PROVIDERS = {
         "default_model": "deepseek-chat",
         "api_key_required": True,
         "description": "DeepSeek API",
-        "supports_file_upload": False  # DeepSeekはファイルアップロード非対応
+        "supports_file_upload": False
     },
     "OpenAI": {
         "url": "https://api.openai.com/v1/responses",
@@ -295,7 +299,6 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
     """ファイルからテキスト内容を抽出する"""
     mime = get_mime_type(filename)
     
-    # テキストファイルの場合
     if mime.startswith("text/") or filename.lower().endswith((".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")):
         try:
             decoded = file_bytes.decode("utf-8", errors="ignore")
@@ -305,10 +308,8 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
         except:
             return f"（バイナリファイル: {len(file_bytes)}バイト）"
     
-    # Word文書 (.docx) - 簡易的なテキスト抽出
     elif filename.lower().endswith((".docx", ".doc")):
         try:
-            # python-docxがインストールされていれば使用
             try:
                 import docx
                 doc = docx.Document(io.BytesIO(file_bytes))
@@ -317,11 +318,10 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
                     return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
                 return text
             except ImportError:
-                return f"（Wordファイル: {filename}、{len(file_bytes)}バイト - python-docxが必要です）"
+                return f"（Wordファイル: {filename}、{len(file_bytes)}バイト）"
         except:
             return f"（Wordファイル: {filename}、{len(file_bytes)}バイト）"
     
-    # PDFファイル
     elif filename.lower().endswith(".pdf"):
         try:
             try:
@@ -334,21 +334,21 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
                     return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
                 return text
             except ImportError:
-                return f"（PDFファイル: {filename}、{len(file_bytes)}バイト - PyPDF2が必要です）"
+                return f"（PDFファイル: {filename}、{len(file_bytes)}バイト）"
         except:
             return f"（PDFファイル: {filename}、{len(file_bytes)}バイト）"
     
-    # その他のバイナリファイル
     else:
         return f"（バイナリファイル: {filename}、{len(file_bytes)}バイト）"
 
 # ==================== 情報チェックAI実行 ====================
 def run_information_check_ai(file_bytes, filename, user_message, check_items):
+    """情報チェックAIを実行して固定フォーマットの結果を返す"""
     prompt = build_information_check_prompt(check_items)
     
     messages = [
         {"role": "system", "content": prompt},
-        {"role": "user", "content": f"以下のファイルとメッセージを分析して、固定フォーマットで出力してください。"}
+        {"role": "user", "content": "以下のファイルとメッセージを分析して、指定された固定フォーマットで出力してください。"}
     ]
     
     user_content = ""
@@ -438,7 +438,6 @@ def call_ai_api(messages, max_tokens=200):
                 content = message.get("content", "")
                 
                 if not content:
-                    st.warning("⚠️ AIからの応答が空です。")
                     return "（応答がありませんでした）", elapsed
                 
                 return content, elapsed
@@ -474,7 +473,6 @@ def call_ai_api(messages, max_tokens=200):
 
 # ==================== OpenAIファイル送信 ====================
 def call_openai_with_file(messages, file_bytes=None, filename=None, mime_type=None, max_tokens=200):
-    """OpenAI Responses APIへ実ファイルを送信する。"""
     start_time = time.time()
     try:
         api_key = st.session_state.ai_api_key
@@ -580,17 +578,13 @@ def call_openai_with_file(messages, file_bytes=None, filename=None, mime_type=No
 
 # ==================== AIファイル送信（統合） ====================
 def call_ai_with_file(messages, file_bytes=None, filename=None, mime_type=None, max_tokens=200):
-    """プロバイダーに応じてファイルを送信"""
     provider = st.session_state.selected_provider
     
     if provider == "OpenAI":
-        # OpenAIはファイルアップロード対応
         return call_openai_with_file(messages, file_bytes, filename, mime_type, max_tokens)
     else:
-        # DeepSeek、LM Studio、Ollama、Groqなどはファイル内容をテキスト抽出して送信
         if file_bytes and filename:
             file_text = extract_file_content(file_bytes, filename)
-            # 最後のユーザーメッセージにファイル内容を追加
             for i, msg in enumerate(messages):
                 if msg.get("role") == "user":
                     messages[i] = {
@@ -771,6 +765,12 @@ def get_content_for_dds(file_data, filename, user_message, send_target):
         file_text = extract_file_content(file_data, filename)
         content += file_text
     return content
+
+# ==================== 履歴クリア関数 ====================
+def clear_conversation():
+    st.session_state.messages = []
+    st.session_state.info_check_results = []
+    st.session_state.txid = str(uuid.uuid4())
 
 # ==================== サイドバー設定 ====================
 with st.sidebar:
@@ -989,6 +989,13 @@ with st.sidebar:
         st.rerun()
     
     st.divider()
+    
+    # クリアボタン（サイドバー下部）
+    if st.button("🗑️ 会話履歴をクリア", key="clear_conversation_btn", use_container_width=True):
+        clear_conversation()
+        st.rerun()
+    
+    st.divider()
     st.caption(f"📡 プロバイダー: **{st.session_state.get('selected_provider', '未設定')}**")
     st.caption(f"🤖 モデル: **{st.session_state.get('ai_model', '未設定')}**")
 
@@ -1008,6 +1015,7 @@ with main_col:
     mode_color = "🟢" if st.session_state.operation_mode == "Monitor" else "🔵"
     st.caption(f"{mode_color} 現在のモード: **{st.session_state.operation_mode}** | 送信ターゲット: **{send_target}**")
     
+    # チャット履歴表示
     chat_container = st.container()
     with chat_container:
         for message in st.session_state.messages:
@@ -1101,11 +1109,16 @@ with main_col:
         # ==================== Monitorモード ====================
         if st.session_state.operation_mode == "Monitor":
             st.info(f"📊 **Monitorモード**で実行します")
+            st.info("🔄 1つ目のリクエスト: 元の内容 → DDS → AI → DDS再検査")
             
-            # ステップ1: DDSに送信
+            # ============================================================
+            # 1つ目のリクエスト: 元の内容をDDSに送信 → AIに送信 → AI回答をDDS再検査
+            # ============================================================
+            
+            # ---- ステップ1: 元の内容をDDSに送信 ----
             step1_start = time.time()
-            add_debug_log("Monitor-ステップ1", "DDSに内容を送信して検査中...", "info")
-            status1 = st.info("🔍 [Monitor-1] DDSに内容を送信して検査中...")
+            add_debug_log("Monitor-1-ステップ1", "元の内容をDDSに送信して検査中...", "info")
+            status1 = st.info("🔍 [Monitor-1-1] 元の内容をDDSに送信して検査中...")
             
             content_for_dds = get_content_for_dds(file_data, filename, user_input, send_target)
             if not content_for_dds.strip():
@@ -1126,53 +1139,25 @@ with main_col:
                 violations = []
             
             status1.empty()
-            st.info(f"✅ [Monitor-1] DDS検査完了 (⏱️ {elapsed1:.2f}秒)")
-            add_debug_log("Monitor-ステップ1", f"DDS検査完了", "success", elapsed1, response_data)
+            st.info(f"✅ [Monitor-1-1] DDS検査完了 (⏱️ {elapsed1:.2f}秒)")
+            add_debug_log("Monitor-1-ステップ1", f"DDS検査完了", "success", elapsed1, response_data)
             
             if error_info:
                 st.error(f"❌ DDSエラー: {error_info}")
-                add_debug_log("Monitor-ステップ1", f"エラー: {error_info}", "error", elapsed1)
+                add_debug_log("Monitor-1-ステップ1", f"エラー: {error_info}", "error", elapsed1)
                 st.stop()
             
             if violations and len(violations) > 0:
                 policy_names = [v["name"] for v in violations]
                 st.warning(f"⚠️ {len(violations)}件のポリシー違反: {', '.join(policy_names)}")
-                add_debug_log("Monitor-ステップ1", f"ポリシー違反: {', '.join(policy_names)}", "warning", elapsed1)
+                add_debug_log("Monitor-1-ステップ1", f"ポリシー違反: {', '.join(policy_names)}", "warning", elapsed1)
             else:
                 st.success("✅ ポリシー違反はありませんでした")
-                add_debug_log("Monitor-ステップ1", "ポリシー違反なし", "success", elapsed1)
+                add_debug_log("Monitor-1-ステップ1", "ポリシー違反なし", "success", elapsed1)
             
-            # 情報チェックAI分析
-            info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
-            if info_items_enabled:
-                add_debug_log("Monitor-情報チェックAI", "情報チェックAIで分析中...", "info")
-                
-                info_result, info_elapsed = run_information_check_ai(
-                    file_data,
-                    filename,
-                    user_input,
-                    info_items_enabled
-                )
-                
-                if info_result:
-                    add_debug_log(
-                        "Monitor-情報チェックAI",
-                        "情報チェックAI分析完了",
-                        "success",
-                        info_elapsed,
-                        {
-                            "check_items": [x["name"] for x in info_items_enabled],
-                            "response": info_result
-                        }
-                    )
-                    with st.expander("🔎 情報チェックAI分析結果", expanded=False):
-                        st.code(info_result, language="text")
-                else:
-                    add_debug_log("Monitor-情報チェックAI", "分析結果を取得できませんでした", "error", info_elapsed)
-            
-            # ステップ2: AIに送信
-            add_debug_log("Monitor-ステップ2", "AIにリクエストを送信中...", "info")
-            st.info("🤖 [Monitor-2] AIにリクエストを送信中...")
+            # ---- ステップ2: AIに送信（元の内容で） ----
+            add_debug_log("Monitor-1-ステップ2", "AIにリクエストを送信中...", "info")
+            st.info("🤖 [Monitor-1-2] AIにリクエストを送信中...")
             
             ai_messages = []
             for msg in st.session_state.messages:
@@ -1187,10 +1172,6 @@ with main_col:
             status_placeholder.info(f"⏳ AI応答を待っています...")
             
             with st.spinner(f"🤖 {st.session_state.ai_model} に送信中..."):
-                provider = st.session_state.selected_provider
-                provider_config = AI_PROVIDERS.get(provider, {})
-                
-                # ファイルがある場合は適切な方法で送信
                 if file_data and filename:
                     ai_response, ai_elapsed = call_ai_with_file(
                         ai_messages,
@@ -1207,16 +1188,16 @@ with main_col:
             
             if not ai_response:
                 st.error(f"❌ AIからの応答がありませんでした")
-                add_debug_log("Monitor-ステップ2", f"AI応答なし", "error", ai_elapsed if 'ai_elapsed' in locals() else 0)
+                add_debug_log("Monitor-1-ステップ2", f"AI応答なし", "error", ai_elapsed if 'ai_elapsed' in locals() else 0)
                 st.stop()
             
-            st.success(f"✅ [Monitor-2] AIからレスポンスを受信 (⏱️ {ai_elapsed:.2f}秒)")
-            add_debug_log("Monitor-ステップ2", f"AI応答受信", "success", ai_elapsed)
+            st.success(f"✅ [Monitor-1-2] AIからレスポンスを受信 (⏱️ {ai_elapsed:.2f}秒)")
+            add_debug_log("Monitor-1-ステップ2", f"AI応答受信", "success", ai_elapsed)
             
-            # ステップ3: AI応答をDDSに送信
+            # ---- ステップ3: AI応答をDDSに送信（再検査） ----
             step3_start = time.time()
-            add_debug_log("Monitor-ステップ3", "AI応答をDDSに送信して再検査中...", "info")
-            st.info("🔍 [Monitor-3] AI応答をDDSに送信して再検査中...")
+            add_debug_log("Monitor-1-ステップ3", "AI応答をDDSに送信して再検査中...", "info")
+            st.info("🔍 [Monitor-1-3] AI応答をDDSに送信して再検査中...")
             
             ai_message_wrapper = MessageWrapper(ai_response, "ai_response")
             v2, request_id2, response_data2, error_info2, elapsed3 = send_detection_request(
@@ -1231,19 +1212,19 @@ with main_col:
             if v2 is None:
                 v2 = []
             
-            st.info(f"✅ [Monitor-3] DDS再検査完了 (⏱️ {elapsed3:.2f}秒)")
-            add_debug_log("Monitor-ステップ3", f"DDS再検査完了", "success", elapsed3, response_data2)
+            st.info(f"✅ [Monitor-1-3] DDS再検査完了 (⏱️ {elapsed3:.2f}秒)")
+            add_debug_log("Monitor-1-ステップ3", f"DDS再検査完了", "success", elapsed3, response_data2)
             
             if error_info2:
                 st.error(f"❌ DDSエラー: {error_info2}")
-                add_debug_log("Monitor-ステップ3", f"エラー: {error_info2}", "error", elapsed3)
+                add_debug_log("Monitor-1-ステップ3", f"エラー: {error_info2}", "error", elapsed3)
                 st.stop()
             
-            # ステップ4: 結果表示
+            # ---- ステップ4: 1つ目の結果表示 ----
             if v2 and len(v2) > 0:
                 policy_names = [v["name"] for v in v2]
                 st.warning(f"⚠️ AI応答に{len(v2)}件のポリシー違反: {', '.join(policy_names)}")
-                add_debug_log("Monitor-ステップ4", f"AI応答にポリシー違反: {', '.join(policy_names)}", "warning", elapsed3)
+                add_debug_log("Monitor-1-ステップ4", f"AI応答にポリシー違反: {', '.join(policy_names)}", "warning", elapsed3)
                 
                 error_msg = f"⚠️ AIの回答にDLP違反が検出されました（違反: {', '.join(policy_names)}）\n\n---\n{ai_response}"
                 st.session_state.messages.append({
@@ -1257,7 +1238,7 @@ with main_col:
                     st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
             else:
                 st.success("✅ AI応答にポリシー違反はありません")
-                add_debug_log("Monitor-ステップ4", "AI応答にポリシー違反なし", "success", elapsed3)
+                add_debug_log("Monitor-1-ステップ4", "AI応答にポリシー違反なし", "success", elapsed3)
                 
                 st.session_state.messages.append({
                     "role": "assistant",
@@ -1267,6 +1248,84 @@ with main_col:
                 with st.chat_message("assistant"):
                     st.write(ai_response)
                     st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
+            
+            # ============================================================
+            # 2つ目のリクエスト: 情報チェックAI分析結果をDDSに送信
+            # ============================================================
+            st.divider()
+            st.info("🔄 2つ目のリクエスト: 情報チェックAI分析結果 → DDS")
+            
+            # ---- ステップ5: 情報チェックAIを実行 ----
+            info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
+            info_result = None
+            info_elapsed = 0
+            
+            if info_items_enabled:
+                add_debug_log("Monitor-2-ステップ1", "情報チェックAIで分析中...", "info")
+                st.info("🔍 [Monitor-2-1] 情報チェックAIで分析中...")
+                
+                info_result, info_elapsed = run_information_check_ai(
+                    file_data,
+                    filename,
+                    user_input,
+                    info_items_enabled
+                )
+                
+                if info_result:
+                    st.success(f"✅ [Monitor-2-1] 情報チェックAI分析完了 (⏱️ {info_elapsed:.2f}秒)")
+                    add_debug_log(
+                        "Monitor-2-ステップ1",
+                        "情報チェックAI分析完了",
+                        "success",
+                        info_elapsed,
+                        {
+                            "check_items": [x["name"] for x in info_items_enabled],
+                            "response": info_result
+                        }
+                    )
+                    # 分析結果を表示
+                    with st.expander("🔎 情報チェックAI分析結果", expanded=True):
+                        st.code(info_result, language="text")
+                else:
+                    st.warning("⚠️ 情報チェックAIの分析結果を取得できませんでした")
+                    add_debug_log("Monitor-2-ステップ1", "分析結果を取得できませんでした", "error", info_elapsed)
+            
+            # ---- ステップ6: 情報チェックAIの結果をDDSに送信 ----
+            if info_result:
+                step6_start = time.time()
+                add_debug_log("Monitor-2-ステップ2", "情報チェックAI分析結果をDDSに送信...", "info")
+                st.info("🔍 [Monitor-2-2] 情報チェックAI分析結果をDDSに送信して検査中...")
+                
+                info_check_wrapper = MessageWrapper(info_result, "info_check_result")
+                v3, request_id3, response_data3, error_info3, elapsed6 = send_detection_request(
+                    info_check_wrapper,
+                    "message",
+                    st.session_state.dds_url,
+                    st.session_state.verify_ssl,
+                    data_type="DIM",
+                    content_block_id="info-check-001"
+                )
+                
+                if v3 is None:
+                    v3 = []
+                
+                st.info(f"✅ [Monitor-2-2] DDS検査完了 (⏱️ {elapsed6:.2f}秒)")
+                add_debug_log("Monitor-2-ステップ2", f"情報チェック結果DDS検査完了", "success", elapsed6, response_data3)
+                
+                if error_info3:
+                    st.error(f"❌ DDSエラー: {error_info3}")
+                    add_debug_log("Monitor-2-ステップ2", f"エラー: {error_info3}", "error", elapsed6)
+                else:
+                    # 結果表示
+                    if v3 and len(v3) > 0:
+                        policy_names = [v["name"] for v in v3]
+                        st.warning(f"⚠️ 情報チェックAI分析結果に{len(v3)}件のポリシー違反: {', '.join(policy_names)}")
+                        add_debug_log("Monitor-2-ステップ3", f"情報チェック結果にポリシー違反: {', '.join(policy_names)}", "warning", elapsed6)
+                    else:
+                        st.success("✅ 情報チェックAI分析結果にポリシー違反はありません")
+                        add_debug_log("Monitor-2-ステップ3", "情報チェック結果にポリシー違反なし", "success", elapsed6)
+            else:
+                st.warning("⚠️ 情報チェックAIの結果がないため、DDSへの送信をスキップしました")
             
             st.success(f"✅ **Monitorモード完了** (合計: {time.time() - st.session_state.process_start_time:.2f}秒)")
             add_debug_log("Monitor-完了", f"全ての処理が完了しました", "success", time.time() - st.session_state.process_start_time)
@@ -1338,7 +1397,7 @@ with main_col:
             
             st.info(f"✅ [Inline-2] DDS検査完了 (⏱️ {elapsed2:.2f}秒)")
             
-            # 情報チェックAI分析
+            # 情報チェックAI分析（デバッグログのみ）
             info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
             if info_items_enabled:
                 add_debug_log("Inline-情報チェックAI", "情報チェックAIで分析中...", "info")
