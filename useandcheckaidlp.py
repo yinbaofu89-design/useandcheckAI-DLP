@@ -32,7 +32,8 @@ if "txid" not in st.session_state:
 if "filters" not in st.session_state:
     st.session_state.filters = [
         {"id": "c23de41e-f4a7-4b9e-9c1b-5b4eef283ec0", "name": "PCI"},
-        {"id": "e58edfb6-bfa2-4256-ae28-ce929ba46bc8", "name": "source code detection"}
+        {"id": "e58edfb6-bfa2-4256-ae28-ce929ba46bc8", "name": "source code detection"},
+        {"id": "1443472b-c71f-49a0-bb44-06119fe48d0c", "name": "情報漏洩防止"}  # 追加フィルター
     ]
 if "dds_configured" not in st.session_state:
     st.session_state.dds_configured = False
@@ -898,7 +899,13 @@ with st.sidebar:
     st.divider()
 
     st.subheader("🔍 DDS設定")
-    dds_host = st.text_input("DDSサーバーIP", value="192.168.2.132")
+    # DDS IPを 20.89.66.42 に変更
+    dds_host = st.text_input(
+        "DDSサーバーIP",
+        value=st.session_state.get("dds_host", "20.89.66.42"),
+        key="dds_host_input"
+    )
+    st.session_state.dds_host = dds_host
     dds_port = st.text_input("ポート", value="443")
     use_ssl = st.checkbox("SSL/TLSを使用", value=False)
     protocol = "https" if use_ssl else "http"
