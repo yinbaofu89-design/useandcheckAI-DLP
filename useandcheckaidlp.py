@@ -89,6 +89,7 @@ if "info_check_items" not in st.session_state:
         {"name": "日本の銀行口座情報", "enabled": True},
         {"name": "日本のクレジットカード情報", "enabled": True},
         {"name": "日本のマイナンバー情報", "enabled": True},
+        {"name": "メールアドレス", "enabled": True},  # メールアドレスを追加
     ]
 
 # ==================== AIプロバイダー設定 ====================
@@ -256,9 +257,9 @@ def render_debug_logs():
     
     st.caption(f"📊 ログ件数: {len(st.session_state.debug_logs)} 件")
 
-# ==================== 情報チェックAIプロンプト（修正版：実際に検出させる） ====================
+# ==================== 情報チェックAIプロンプト（修正版） ====================
 def build_information_check_prompt(check_items):
-    """情報チェックAIのプロンプトを生成する（実際に検出させる版）"""
+    """情報チェックAIのプロンプトを生成する"""
     items = [x["name"] for x in check_items if x.get("enabled")]
     item_lines = "\n".join(f"- {item}" for item in items)
 
@@ -273,6 +274,8 @@ def build_information_check_prompt(check_items):
 【出力ルール】
 1. 該当する情報が**含まれている場合**、以下の形式で出力してください。
 2. 該当する情報が**含まれていない場合**は、何も出力しないでください。
+3. 推測や類推は行わないでください。
+4. 説明や挨拶は一切不要です。
 
 【出力形式】
 [項目名]情報内包
@@ -287,15 +290,14 @@ def build_information_check_prompt(check_items):
 
 【注意】
 - 上記は出力形式の例です。実際に含まれている項目だけを出力してください。
-- 含まれていない項目は絶対に出力しないでください。
-- 推測や類推は行わないでください。
-- 説明や挨拶は一切不要です。"""
+- 含まれていない項目は絶対に出力しないでください。"""
 
-# ==================== ファイル内容抽出関数 ====================
+# ==================== ファイル内容抽出関数（修正版） ====================
 def extract_file_content(file_bytes, filename, max_chars=5000):
-    """ファイルからテキスト内容を抽出する"""
+    """ファイルからテキスト内容を抽出する（バイナリファイル対応）"""
     mime = get_mime_type(filename)
     
+    # テキストファイル
     if mime.startswith("text/") or filename.lower().endswith((".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")):
         try:
             decoded = file_bytes.decode("utf-8", errors="ignore")
@@ -305,71 +307,107 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
         except:
             return f"（バイナリファイル: {len(file_bytes)}バイト）"
     
-    elif filename.lower().endswith((".docx", ".doc")):
+    # Word文書 (.docx)
+    elif filename.lower().endswith(".docx"):
         try:
-            try:
-                import docx
-                doc = docx.Document(io.BytesIO(file_bytes))
-                text = "\n".join([para.text for para in doc.paragraphs])
-                if len(text) > max_chars:
-                    return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
-                return text
-            except ImportError:
-                return f"（Wordファイル: {filename}、{len(file_bytes)}バイト）"
+            # python-docx をインポート
+            import docx
+            doc = docx.Document(io.BytesIO(file_bytes))
+            text = "\n".join([para.text for para in doc.paragraphs])
+            if len(text) > max_chars:
+                return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
+            return text
+        except ImportError:
+            # python-docx がない場合は代替手段
+            return f"（Wordファイル: {filename}、{len(file_bytes)}バイト - python-docxが必要です）"
+        except Exception as e:
+            return f"（Wordファイル抽出エラー: {e}）"
+    
+    # 古いWord文書 (.doc)
+    elif filename.lower().endswith(".doc"):
+        try:
+            # antiword または catdoc を使用するか、テキスト抽出を試みる
+            # 簡易的にファイルサイズと名前のみ返す
+            return f"（Wordファイル: {filename}、{len(file_bytes)}バイト - テキスト抽出には変換が必要です）"
         except:
             return f"（Wordファイル: {filename}、{len(file_bytes)}バイト）"
     
+    # PDFファイル
     elif filename.lower().endswith(".pdf"):
         try:
-            try:
-                import PyPDF2
-                reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text() + "\n"
-                if len(text) > max_chars:
-                    return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
-                return text
-            except ImportError:
-                return f"（PDFファイル: {filename}、{len(file_bytes)}バイト）"
-        except:
-            return f"（PDFファイル: {filename}、{len(file_bytes)}バイト）"
+            import PyPDF2
+            reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+            if len(text) > max_chars:
+                return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
+            return text
+        except ImportError:
+            return f"（PDFファイル: {filename}、{len(file_bytes)}バイト - PyPDF2が必要です）"
+        except Exception as e:
+            return f"（PDF抽出エラー: {e}）"
     
+    # Excelファイル (.xlsx)
+    elif filename.lower().endswith((".xlsx", ".xls")):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+            text = ""
+            for sheet in wb.worksheets:
+                text += f"【シート: {sheet.title}】\n"
+                for row in sheet.iter_rows(values_only=True):
+                    row_text = " ".join([str(cell) for cell in row if cell is not None])
+                    if row_text:
+                        text += row_text + "\n"
+            if len(text) > max_chars:
+                return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
+            return text
+        except ImportError:
+            return f"（Excelファイル: {filename}、{len(file_bytes)}バイト - openpyxlが必要です）"
+        except Exception as e:
+            return f"（Excel抽出エラー: {e}）"
+    
+    # その他のバイナリファイル
     else:
         return f"（バイナリファイル: {filename}、{len(file_bytes)}バイト）"
 
-# ==================== 情報チェックAI実行 ====================
+# ==================== 情報チェックAI実行（修正版） ====================
 def run_information_check_ai(file_bytes, filename, user_message, check_items, additional_context=None):
     """
-    情報チェックAIを実行する
+    情報チェックAIを実行する（ファイル内容を確実に渡す）
     
     Args:
         file_bytes: ファイルデータ
         filename: ファイル名
         user_message: ユーザーメッセージ
         check_items: チェック項目リスト
-        additional_context: 追加のコンテキスト情報（AI回答のDDSチェック結果など）
+        additional_context: 追加のコンテキスト情報
     """
     prompt = build_information_check_prompt(check_items)
     
-    # システムメッセージにプロンプトを設定
+    # システムメッセージ
     messages = [
         {"role": "system", "content": prompt},
         {"role": "user", "content": "以下の内容を分析し、該当する情報があれば出力してください。"}
     ]
     
     user_content = ""
+    
+    # ユーザーメッセージ
     if user_message:
         user_content += f"【メッセージ】\n{user_message}\n\n"
     
+    # ファイル内容（確実に抽出して渡す）
     if file_bytes and filename:
         user_content += f"【ファイル: {filename}】\n"
         file_text = extract_file_content(file_bytes, filename)
         user_content += file_text
+        user_content += "\n"
     
-    # 追加コンテキストがある場合（AI回答のDDSチェック結果など）
+    # 追加コンテキスト
     if additional_context:
-        user_content += "\n\n【追加コンテキスト情報】\n"
+        user_content += "\n【追加コンテキスト情報】\n"
         user_content += additional_context
     
     if user_content:
@@ -419,7 +457,7 @@ def call_ai_api(messages, max_tokens=200):
             "model": model_name,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.3,  # 少し上げてパターン認識を改善
+            "temperature": 0.3,
             "stream": False
         }
         
@@ -450,7 +488,6 @@ def call_ai_api(messages, max_tokens=200):
                 message = choice.get("message", {})
                 content = message.get("content", "")
                 
-                # 空の応答の場合は「検出結果なし」として扱う
                 if not content or content.strip() == "":
                     content = "検出結果なし"
                 
@@ -462,7 +499,6 @@ def call_ai_api(messages, max_tokens=200):
                         line = line.strip()
                         if not line:
                             continue
-                        # 挨拶や説明文をスキップ
                         skip_patterns = ['はい、', 'わかりました', '以下は', '分析結果', '【', '（', '注意', '重要', '確認します']
                         should_skip = False
                         for pattern in skip_patterns:
@@ -1133,15 +1169,12 @@ with main_col:
     mode_color = "🟢" if st.session_state.operation_mode == "Monitor" else "🔵"
     st.caption(f"{mode_color} 現在のモード: **{st.session_state.operation_mode}** | 送信ターゲット: **{send_target}**")
     
-    # Inlineモードの説明
     if st.session_state.operation_mode == "Inline":
         st.info("🔒 **Inlineモード**: 送信内容をDDSでチェックし、違反があればブロックします。その後、情報チェックAI分析を実行します。")
     
-    # DDSレスポンス表示状態を表示
     if st.session_state.show_dds_response:
         st.info("📋 DDSレスポンス表示: **ON** - すべてのDDSレスポンスが表示されます")
     
-    # チャット履歴表示
     chat_container = st.container()
     with chat_container:
         for message in st.session_state.messages:
@@ -1149,11 +1182,9 @@ with main_col:
                 st.write(message["content"])
                 if "violations" in message and message["violations"]:
                     st.error(f"🚫 ポリシー違反: {', '.join([v['name'] for v in message['violations']])}")
-                # DDSレスポンス詳細（トグルがONの場合のみ表示）
                 if "dds_response" in message and message["dds_response"] and st.session_state.show_dds_response:
                     with st.expander("📋 DDSレスポンス詳細", expanded=False):
                         st.markdown(message["dds_response"])
-                # AI回答DDSチェック詳細（トグルがONの場合のみ表示）
                 if "ai_check_dds_response" in message and message["ai_check_dds_response"] and st.session_state.show_dds_response:
                     with st.expander("📋 AI回答DDSチェック詳細", expanded=False):
                         st.markdown(message["ai_check_dds_response"])
@@ -1248,10 +1279,10 @@ with main_col:
             st.info("🔄 2つ目のリクエスト: 情報チェックAI（AI回答DDSチェック結果を連携）")
             
             # ============================================================
-            # 1つ目のリクエスト: 元の内容をDDSに送信 → AIに送信 → AI回答をDDSチェック → DDS再検査
+            # 1つ目のリクエスト
             # ============================================================
             
-            # ---- ステップ1: 元の内容をDDSに送信 ----
+            # ステップ1: 元の内容をDDSに送信
             step1_start = time.time()
             add_debug_log("Monitor-1-ステップ1", "元の内容をDDSに送信して検査中...", "info")
             status1 = st.info("🔍 [Monitor-1-1] 元の内容をDDSに送信して検査中...")
@@ -1291,7 +1322,7 @@ with main_col:
                 st.success("✅ ポリシー違反はありませんでした")
                 add_debug_log("Monitor-1-ステップ1", "ポリシー違反なし", "success", elapsed1)
             
-            # ---- ステップ2: AIに送信（元の内容で） ----
+            # ステップ2: AIに送信
             add_debug_log("Monitor-1-ステップ2", "AIにリクエストを送信中...", "info")
             st.info("🤖 [Monitor-1-2] AIにリクエストを送信中...")
             
@@ -1330,7 +1361,7 @@ with main_col:
             st.success(f"✅ [Monitor-1-2] AIからレスポンスを受信 (⏱️ {ai_elapsed:.2f}秒)")
             add_debug_log("Monitor-1-ステップ2", f"AI応答受信", "success", ai_elapsed)
             
-            # ---- ステップ2.5: AI回答をDDSでチェック ----
+            # ステップ2.5: AI回答をDDSでチェック
             st.info("🔍 [Monitor-1-2.5] AI回答をDDSでチェック中...")
             
             ai_check_violations, ai_check_request_id, ai_check_response_data, ai_check_error, ai_check_elapsed = check_ai_response_with_dds(
@@ -1339,13 +1370,10 @@ with main_col:
             
             st.info(f"✅ [Monitor-1-2.5] AI回答DDSチェック完了 (⏱️ {ai_check_elapsed:.2f}秒)")
             
-            # DDSレスポンスを整形（トグルがONの場合のみ保存）
             ai_check_dds_response = format_dds_response(ai_check_response_data, ai_check_violations, ai_check_request_id) if st.session_state.show_dds_response else None
-            
-            # AI回答チェックで違反があった場合の処理
             ai_response_has_violation = ai_check_violations and len(ai_check_violations) > 0
             
-            # ---- ステップ3: AI応答をDDSに送信（再検査） ----
+            # ステップ3: AI応答をDDSに送信（再検査）
             step3_start = time.time()
             add_debug_log("Monitor-1-ステップ3", "AI応答をDDSに送信して再検査中...", "info")
             st.info("🔍 [Monitor-1-3] AI応答をDDSに送信して再検査中...")
@@ -1371,10 +1399,9 @@ with main_col:
                 add_debug_log("Monitor-1-ステップ3", f"エラー: {error_info2}", "error", elapsed3)
                 st.stop()
             
-            # DDSレスポンスを整形（トグルがONの場合のみ保存）
             dds_response_text = format_dds_response(response_data2, v2, request_id2) if st.session_state.show_dds_response else None
             
-            # ---- ステップ4: 1つ目の結果表示 ----
+            # ステップ4: 結果表示
             if ai_response_has_violation:
                 ai_policy_names = [v["name"] for v in ai_check_violations]
                 st.warning(f"⚠️ AIの回答にポリシー違反が検出されました: {', '.join(ai_policy_names)}")
@@ -1385,7 +1412,6 @@ with main_col:
                 st.warning(f"⚠️ AI応答に{len(v2)}件のポリシー違反: {', '.join(policy_names)}")
                 add_debug_log("Monitor-1-ステップ4", f"AI応答にポリシー違反: {', '.join(policy_names)}", "warning", elapsed3)
                 
-                # 違反があってもAI回答を表示（Monitorモード）
                 error_msg = f"⚠️ AIの回答にDLP違反が検出されました（違反: {', '.join(policy_names)}）\n\n---\n{ai_response}"
                 if ai_response_has_violation:
                     error_msg = f"⚠️ AIの回答にDLP違反が検出されました（違反: {', '.join(ai_policy_names)}）\n\n---\n{ai_response}"
@@ -1437,12 +1463,11 @@ with main_col:
                             st.markdown(ai_check_dds_response)
             
             # ============================================================
-            # 2つ目のリクエスト: 情報チェックAI分析（AI回答DDSチェック結果を連携）
+            # 2つ目のリクエスト: 情報チェックAI
             # ============================================================
             st.divider()
             st.info("🔄 2つ目のリクエスト: 情報チェックAI分析（AI回答DDSチェック結果を連携）")
             
-            # ---- ステップ5: 情報チェックAIを実行（追加コンテキスト付き） ----
             info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
             info_result = None
             info_elapsed = 0
@@ -1451,7 +1476,6 @@ with main_col:
                 add_debug_log("Monitor-2-ステップ1", "情報チェックAIで分析中（AI回答DDSチェック結果を連携）...", "info")
                 st.info("🔍 [Monitor-2-1] 情報チェックAIで分析中（AI回答DDSチェック結果を連携）...")
                 
-                # 追加コンテキストを構築（AI回答のDDSチェック結果）
                 additional_context = ""
                 if ai_response_has_violation:
                     ai_policy_names = [v["name"] for v in ai_check_violations]
@@ -1465,7 +1489,6 @@ with main_col:
                     additional_context += f"- 違反検出: なし\n"
                     additional_context += f"- チェックID: {ai_check_request_id}\n"
                 
-                # 通常のDDS再検査結果も追加
                 if v2 and len(v2) > 0:
                     v2_policy_names = [v["name"] for v in v2]
                     additional_context += f"\n【AI回答のDDS再検査結果】\n"
@@ -1488,7 +1511,7 @@ with main_col:
                     st.success(f"✅ [Monitor-2-1] 情報チェックAI分析完了 (⏱️ {info_elapsed:.2f}秒)")
                     add_debug_log(
                         "Monitor-2-ステップ1",
-                        "情報チェックAI分析完了（AI回答DDSチェック結果を連携）",
+                        "情報チェックAI分析完了",
                         "success",
                         info_elapsed,
                         {
@@ -1503,7 +1526,7 @@ with main_col:
                     st.warning("⚠️ 情報チェックAIの分析結果を取得できませんでした")
                     add_debug_log("Monitor-2-ステップ1", "分析結果を取得できませんでした", "error", info_elapsed)
             
-            # ---- ステップ6: 情報チェックAIの結果をDDSに送信 ----
+            # ステップ6: 情報チェックAIの結果をDDSに送信
             if info_result:
                 step6_start = time.time()
                 add_debug_log("Monitor-2-ステップ2", "情報チェックAI分析結果をDDSに送信...", "info")
@@ -1539,7 +1562,6 @@ with main_col:
                         st.success("✅ 情報チェックAI分析結果にポリシー違反はありません")
                         add_debug_log("Monitor-2-ステップ3", "情報チェック結果にポリシー違反なし", "success", elapsed6)
                     
-                    # 連携したコンテキスト情報を表示
                     context_summary = ""
                     if ai_response_has_violation:
                         ai_policy_names = [v["name"] for v in ai_check_violations]
@@ -1633,7 +1655,6 @@ with main_col:
                 policy_names = [v["name"] for v in violations]
                 st.session_state.blocked_content = True
                 
-                # 大きな警告表示（ブロック）
                 st.error(f"""
                 🚫 **【ブロック】ポリシー違反が検出されました**
                 
@@ -1646,7 +1667,6 @@ with main_col:
                 
                 add_debug_log("Inline-ステップ1", f"ブロック: ポリシー違反 {', '.join(policy_names)}", "error", elapsed1)
                 
-                # ブロックメッセージを履歴に追加
                 block_msg = f"""
 🚫 **【ブロック】ポリシー違反が検出されました**
 
@@ -1672,7 +1692,6 @@ with main_col:
                         with st.expander("📋 DDSレスポンス詳細", expanded=False):
                             st.markdown(dds_response_text)
                 
-                # ブロックされても継続処理（情報チェックAIは実行）
                 st.info("🔄 ブロックされましたが、情報チェックAI分析を継続します...")
             else:
                 st.success("✅ ポリシー違反はありません - 継続処理します")
@@ -1726,15 +1745,11 @@ with main_col:
                 
                 st.info(f"✅ [Inline-1.6] AI回答DDSチェック完了 (⏱️ {ai_check_elapsed:.2f}秒)")
                 
-                # DDSレスポンスを整形（トグルがONの場合のみ保存）
                 ai_check_dds_response = format_dds_response(ai_check_response_data, ai_check_violations, ai_check_request_id) if st.session_state.show_dds_response else None
-                
-                # AI回答チェックで違反があった場合の処理（Inlineモードは表示しない）
                 ai_response_has_violation = ai_check_violations and len(ai_check_violations) > 0
                 
                 if ai_response_has_violation:
                     ai_policy_names = [v["name"] for v in ai_check_violations]
-                    # Inlineモード: 警告メッセージを表示（AI回答は表示しない）
                     st.error(f"""
                     🚨 **【警告】AIの回答にポリシー違反が検出されました**
                     
@@ -1747,7 +1762,6 @@ with main_col:
                     
                     add_debug_log("Inline-ステップ1.6", f"AI回答にポリシー違反: {', '.join(ai_policy_names)} - 表示ブロック", "error", ai_check_elapsed)
                     
-                    # 警告メッセージを履歴に追加（AI回答は表示しない）
                     warn_msg = f"""
 🚨 **【警告】AIの回答にポリシー違反が検出されました**
 
@@ -1776,7 +1790,6 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                     st.success("✅ AI回答にポリシー違反はありません")
                     add_debug_log("Inline-ステップ1.6", "AI回答にポリシー違反なし", "success", ai_check_elapsed)
                     
-                    # 違反なし → AI回答を表示
                     msg_data = {
                         "role": "assistant",
                         "content": ai_response,
@@ -1794,7 +1807,7 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                                 st.markdown(ai_check_dds_response)
             
             # ============================================================
-            # ステップ2: 情報チェックAIを実行（AI回答DDSチェック結果を連携）
+            # ステップ2: 情報チェックAIを実行
             # ============================================================
             info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
             info_result = None
@@ -1804,7 +1817,6 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                 add_debug_log("Inline-ステップ2", "情報チェックAIで分析中（AI回答DDSチェック結果を連携）...", "info")
                 st.info("🔍 [Inline-2] 情報チェックAIで分析中（AI回答DDSチェック結果を連携）...")
                 
-                # 追加コンテキストを構築（AI回答のDDSチェック結果）
                 additional_context = ""
                 if ai_response and not content_has_violation:
                     if ai_response_has_violation:
@@ -1834,7 +1846,7 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                     st.success(f"✅ [Inline-2] 情報チェックAI分析完了 (⏱️ {info_elapsed:.2f}秒)")
                     add_debug_log(
                         "Inline-ステップ2",
-                        "情報チェックAI分析完了（AI回答DDSチェック結果を連携）",
+                        "情報チェックAI分析完了",
                         "success",
                         info_elapsed,
                         {
@@ -1895,7 +1907,6 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                         st.success("✅ 情報チェックAI分析結果にポリシー違反はありません")
                         add_debug_log("Inline-ステップ4", "情報チェック結果にポリシー違反なし", "success", elapsed3)
                     
-                    # 連携したコンテキスト情報を表示
                     context_summary = ""
                     if ai_response and not content_has_violation:
                         if ai_response_has_violation:
