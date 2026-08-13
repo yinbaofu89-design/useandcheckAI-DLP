@@ -33,7 +33,7 @@ if "filters" not in st.session_state:
     st.session_state.filters = [
         {"id": "c23de41e-f4a7-4b9e-9c1b-5b4eef283ec0", "name": "PCI"},
         {"id": "e58edfb6-bfa2-4256-ae28-ce929ba46bc8", "name": "source code detection"},
-        {"id": "1443472b-c71f-49a0-bb44-06119fe48d0c", "name": "情報漏洩防止"}  # 追加フィルター
+        {"id": "1443472b-c71f-49a0-bb44-06119fe48d0c", "name": "情報漏洩防止"}
     ]
 if "dds_configured" not in st.session_state:
     st.session_state.dds_configured = False
@@ -75,9 +75,11 @@ if "send_target" not in st.session_state:
     st.session_state.send_target = "both"
 if "info_check_done" not in st.session_state:
     st.session_state.info_check_done = False
-# DDSレスポンス表示トグル（デフォルト: False = 非表示）
 if "show_dds_response" not in st.session_state:
     st.session_state.show_dds_response = False
+# Inlineモード用のブロックフラグ
+if "blocked_content" not in st.session_state:
+    st.session_state.blocked_content = False
 
 # 情報チェックリスト項目
 if "info_check_items" not in st.session_state:
@@ -774,6 +776,7 @@ def clear_conversation():
     st.session_state.messages = []
     st.session_state.info_check_results = []
     st.session_state.txid = str(uuid.uuid4())
+    st.session_state.blocked_content = False
 
 # ==================== DDSレスポンス整形関数 ====================
 def format_dds_response(response_data, violations, request_id):
@@ -899,7 +902,6 @@ with st.sidebar:
     st.divider()
 
     st.subheader("🔍 DDS設定")
-    # DDS IPを 20.89.66.42 に変更
     dds_host = st.text_input(
         "DDSサーバーIP",
         value=st.session_state.get("dds_host", "20.89.66.42"),
@@ -1074,6 +1076,10 @@ with main_col:
     mode_color = "🟢" if st.session_state.operation_mode == "Monitor" else "🔵"
     st.caption(f"{mode_color} 現在のモード: **{st.session_state.operation_mode}** | 送信ターゲット: **{send_target}**")
     
+    # Inlineモードの説明
+    if st.session_state.operation_mode == "Inline":
+        st.info("🔒 **Inlineモード**: 送信内容をDDSでチェックし、違反があればブロックします。その後、情報チェックAI分析を実行します。")
+    
     # DDSレスポンス表示状態を表示
     if st.session_state.show_dds_response:
         st.info("📋 DDSレスポンス表示: **ON** - すべてのDDSレスポンスが表示されます")
@@ -1153,6 +1159,7 @@ with main_col:
     # ==================== 送信処理 ====================
     if user_input:
         st.session_state.process_start_time = time.time()
+        st.session_state.blocked_content = False
         
         with st.chat_message("user"):
             st.write(user_input)
@@ -1442,101 +1449,17 @@ with main_col:
             st.success(f"✅ **Monitorモード完了** (合計: {time.time() - st.session_state.process_start_time:.2f}秒)")
             add_debug_log("Monitor-完了", f"全ての処理が完了しました", "success", time.time() - st.session_state.process_start_time)
         
-        # ==================== Inlineモード ====================
+        # ==================== Inlineモード（修正版） ====================
         else:
             st.info(f"📊 **Inlineモード**で実行します")
+            st.info("🔒 送信内容をDDSでチェックし、違反があればブロックします")
             
-            # ステップ1: AIに送信
-            add_debug_log("Inline-ステップ1", "AIにリクエストを送信中...", "info")
-            st.info("🤖 [Inline-1] AIにリクエストを送信中...")
-            
-            ai_messages = []
-            for msg in st.session_state.messages:
-                if msg["role"] != "assistant" or "violations" not in msg:
-                    ai_messages.append({"role": msg["role"], "content": msg["content"]})
-            
-            current_msg = user_input
-            ai_messages.append({"role": "user", "content": current_msg})
-            
-            start_time = time.time()
-            status_placeholder = st.empty()
-            status_placeholder.info(f"⏳ AI応答を待っています...")
-            
-            with st.spinner(f"🤖 {st.session_state.ai_model} に送信中..."):
-                if file_data and filename:
-                    ai_response, ai_elapsed = call_ai_with_file(
-                        ai_messages,
-                        file_bytes=file_data,
-                        filename=filename,
-                        mime_type=get_mime_type(filename),
-                        max_tokens=200
-                    )
-                else:
-                    ai_response, ai_elapsed = call_ai_api(ai_messages, max_tokens=200)
-            
-            status_placeholder.empty()
-            elapsed_time = time.time() - start_time
-            
-            if not ai_response:
-                st.error(f"❌ AIからの応答がありませんでした")
-                add_debug_log("Inline-ステップ1", f"AI応答なし", "error", ai_elapsed if 'ai_elapsed' in locals() else 0)
-                st.stop()
-            
-            st.success(f"✅ [Inline-1] AIからレスポンスを受信 (⏱️ {ai_elapsed:.2f}秒)")
-            add_debug_log("Inline-ステップ1", f"AI応答受信", "success", ai_elapsed)
-            
-            # ステップ2: AI応答をDDSに送信（結果非表示）
-            step2_start = time.time()
-            add_debug_log("Inline-ステップ2", "AI応答をDDSに送信（結果非表示）...", "info")
-            st.info("🔍 [Inline-2] AI応答をDDSに送信して検査中（結果は非表示）...")
-            
-            ai_message_wrapper = MessageWrapper(ai_response, "ai_response")
-            v2, request_id2, response_data2, error_info2, elapsed2 = send_detection_request(
-                ai_message_wrapper,
-                "message",
-                st.session_state.dds_url,
-                st.session_state.verify_ssl,
-                data_type="DIM",
-                content_block_id="ai-response-001"
-            )
-            
-            if v2 is None:
-                v2 = []
-            
-            if st.session_state.debug_mode:
-                add_debug_log("Inline-ステップ2", f"AI応答DDS検査完了 (違反: {len(v2)}件)", 
-                             "warning" if v2 else "success", elapsed2, response_data2)
-            
-            st.info(f"✅ [Inline-2] DDS検査完了 (⏱️ {elapsed2:.2f}秒)")
-            
-            # 情報チェックAI分析（デバッグログのみ）
-            info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
-            if info_items_enabled:
-                add_debug_log("Inline-情報チェックAI", "情報チェックAIで分析中...", "info")
-                
-                info_result, info_elapsed = run_information_check_ai(
-                    file_data,
-                    filename,
-                    user_input,
-                    info_items_enabled
-                )
-                
-                if info_result:
-                    add_debug_log(
-                        "Inline-情報チェックAI",
-                        "情報チェックAI分析完了",
-                        "success",
-                        info_elapsed,
-                        {
-                            "check_items": [x["name"] for x in info_items_enabled],
-                            "response": info_result
-                        }
-                    )
-            
-            # ステップ3: 元の内容をDDSに送信
-            step3_start = time.time()
-            add_debug_log("Inline-ステップ3", "元の内容をDDSに送信...", "info")
-            st.info("🔍 [Inline-3] 元の内容をDDSに送信して検査中...")
+            # ============================================================
+            # ステップ1: 元の内容をDDSに送信（ブロックチェック）
+            # ============================================================
+            step1_start = time.time()
+            add_debug_log("Inline-ステップ1", "元の内容をDDSに送信してブロックチェック...", "info")
+            status1 = st.info("🔍 [Inline-1] 元の内容をDDSに送信してブロックチェック中...")
             
             content_for_dds = get_content_for_dds(file_data, filename, user_input, send_target)
             if not content_for_dds.strip():
@@ -1544,7 +1467,7 @@ with main_col:
                 st.stop()
             
             content_wrapper = MessageWrapper(content_for_dds, "content")
-            violations, request_id, response_data, error_info, elapsed3 = send_detection_request(
+            violations, request_id, response_data, error_info, elapsed1 = send_detection_request(
                 content_wrapper,
                 "message",
                 st.session_state.dds_url,
@@ -1556,58 +1479,185 @@ with main_col:
             if violations is None:
                 violations = []
             
-            st.info(f"✅ [Inline-3] DDS検査完了 (⏱️ {elapsed3:.2f}秒)")
-            add_debug_log("Inline-ステップ3", f"元の内容DDS検査完了", "success", elapsed3, response_data)
+            status1.empty()
+            st.info(f"✅ [Inline-1] DDSブロックチェック完了 (⏱️ {elapsed1:.2f}秒)")
+            add_debug_log("Inline-ステップ1", f"DDSブロックチェック完了", "success", elapsed1, response_data)
             
             if error_info:
                 st.error(f"❌ DDSエラー: {error_info}")
-                add_debug_log("Inline-ステップ3", f"エラー: {error_info}", "error", elapsed3)
+                add_debug_log("Inline-ステップ1", f"エラー: {error_info}", "error", elapsed1)
                 st.stop()
             
-            # DDSレスポンスを整形（トグルがONの場合のみ）
-            dds_response_text = format_dds_response(response_data, violations, request_id) if st.session_state.show_dds_response else None
-            
-            # ステップ4: 違反チェック
+            # ---- ブロック判定 ----
             if violations and len(violations) > 0:
                 policy_names = [v["name"] for v in violations]
-                st.error(f"🚫 ポリシー違反が検出されました: {', '.join(policy_names)}")
-                st.error("❌ AIを継続で利用できません")
-                add_debug_log("Inline-ステップ4", f"ポリシー違反: {', '.join(policy_names)} - AI利用不可", "error", elapsed3)
+                st.session_state.blocked_content = True
                 
-                error_msg = f"🚫 ポリシー違反が検出されたため、AIを継続で利用できません。\n違反: {', '.join(policy_names)}"
+                # 大きな警告表示
+                st.error(f"""
+                🚫 **【ブロック】ポリシー違反が検出されました**
+                
+                あなたの送信した内容に以下のポリシー違反が含まれているため、送信をブロックしました。
+                
+                **違反ポリシー:** {', '.join(policy_names)}
+                
+                この内容はAIに送信されませんでした。
+                """)
+                
+                add_debug_log("Inline-ステップ1", f"ブロック: ポリシー違反 {', '.join(policy_names)}", "error", elapsed1)
+                
+                # ブロックメッセージを履歴に追加
+                block_msg = f"""
+🚫 **【ブロック】ポリシー違反が検出されました**
+
+あなたの送信した内容に以下のポリシー違反が含まれているため、送信をブロックしました。
+
+**違反ポリシー:** {', '.join(policy_names)}
+
+この内容はAIに送信されませんでした。
+"""
                 msg_data = {
                     "role": "assistant",
-                    "content": error_msg,
+                    "content": block_msg,
                     "violations": violations
                 }
-                if dds_response_text:
+                if st.session_state.show_dds_response:
+                    dds_response_text = format_dds_response(response_data, violations, request_id)
                     msg_data["dds_response"] = dds_response_text
                 st.session_state.messages.append(msg_data)
                 
                 with st.chat_message("assistant"):
-                    st.error(error_msg)
-                    if dds_response_text:
+                    st.error(block_msg)
+                    if st.session_state.show_dds_response and dds_response_text:
                         with st.expander("📋 DDSレスポンス詳細", expanded=False):
                             st.markdown(dds_response_text)
+                
+                # ブロックされても継続処理（情報チェックAIは実行）
+                st.info("🔄 ブロックされましたが、情報チェックAI分析を継続します...")
             else:
-                st.success("✅ ポリシー違反はありません - AI回答を表示")
-                add_debug_log("Inline-ステップ4", "ポリシー違反なし - AI回答を表示", "success", elapsed3)
+                st.success("✅ ポリシー違反はありません - 継続処理します")
+                add_debug_log("Inline-ステップ1", "ポリシー違反なし - 継続", "success", elapsed1)
+            
+            # ============================================================
+            # ステップ2: 情報チェックAIを実行（ブロックされても実行）
+            # ============================================================
+            info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
+            info_result = None
+            info_elapsed = 0
+            
+            if info_items_enabled:
+                add_debug_log("Inline-ステップ2", "情報チェックAIで分析中...", "info")
+                st.info("🔍 [Inline-2] 情報チェックAIで分析中...")
                 
-                msg_data = {
-                    "role": "assistant",
-                    "content": ai_response,
-                    "violations": []
-                }
-                if dds_response_text:
-                    msg_data["dds_response"] = dds_response_text
-                st.session_state.messages.append(msg_data)
+                info_result, info_elapsed = run_information_check_ai(
+                    file_data,
+                    filename,
+                    user_input,
+                    info_items_enabled
+                )
                 
-                with st.chat_message("assistant"):
-                    st.write(ai_response)
-                    st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
-                    if dds_response_text:
-                        with st.expander("📋 DDSレスポンス詳細", expanded=False):
-                            st.markdown(dds_response_text)
+                if info_result:
+                    st.success(f"✅ [Inline-2] 情報チェックAI分析完了 (⏱️ {info_elapsed:.2f}秒)")
+                    add_debug_log(
+                        "Inline-ステップ2",
+                        "情報チェックAI分析完了",
+                        "success",
+                        info_elapsed,
+                        {
+                            "check_items": [x["name"] for x in info_items_enabled],
+                            "response": info_result
+                        }
+                    )
+                    with st.expander("🔎 情報チェックAI分析結果", expanded=True):
+                        st.code(info_result, language="text")
+                else:
+                    st.warning("⚠️ 情報チェックAIの分析結果を取得できませんでした")
+                    add_debug_log("Inline-ステップ2", "分析結果を取得できませんでした", "error", info_elapsed)
+            
+            # ============================================================
+            # ステップ3: 情報チェックAIの結果をDDSに送信
+            # ============================================================
+            if info_result:
+                step3_start = time.time()
+                add_debug_log("Inline-ステップ3", "情報チェックAI分析結果をDDSに送信...", "info")
+                st.info("🔍 [Inline-3] 情報チェックAI分析結果をDDSに送信して検査中...")
+                
+                info_check_wrapper = MessageWrapper(info_result, "info_check_result")
+                v3, request_id3, response_data3, error_info3, elapsed3 = send_detection_request(
+                    info_check_wrapper,
+                    "message",
+                    st.session_state.dds_url,
+                    st.session_state.verify_ssl,
+                    data_type="DIM",
+                    content_block_id="info-check-001"
+                )
+                
+                if v3 is None:
+                    v3 = []
+                
+                st.info(f"✅ [Inline-3] DDS検査完了 (⏱️ {elapsed3:.2f}秒)")
+                add_debug_log("Inline-ステップ3", f"情報チェック結果DDS検査完了", "success", elapsed3, response_data3)
+                
+                if error_info3:
+                    st.error(f"❌ DDSエラー: {error_info3}")
+                    add_debug_log("Inline-ステップ3", f"エラー: {error_info3}", "error", elapsed3)
+                else:
+                    # DDSレスポンスを整形（トグルがONの場合のみ）
+                    info_dds_response = format_dds_response(response_data3, v3, request_id3) if st.session_state.show_dds_response else None
+                    
+                    # 結果表示
+                    if v3 and len(v3) > 0:
+                        policy_names = [v["name"] for v in v3]
+                        
+                        # 大きな警告表示
+                        st.error(f"""
+                        🚨 **【警告】情報チェックAI分析結果にポリシー違反が検出されました**
+                        
+                        情報チェックAIの分析結果に以下のポリシー違反が含まれています。
+                        
+                        **違反ポリシー:** {', '.join(policy_names)}
+                        
+                        この内容はDLPの補助情報として記録されます。
+                        """)
+                        
+                        add_debug_log("Inline-ステップ4", f"情報チェック結果にポリシー違反: {', '.join(policy_names)}", "error", elapsed3)
+                    else:
+                        st.success("✅ 情報チェックAI分析結果にポリシー違反はありません")
+                        add_debug_log("Inline-ステップ4", "情報チェック結果にポリシー違反なし", "success", elapsed3)
+                    
+                    # 情報チェックのメッセージを構築
+                    info_msg = f"📊 **情報チェックAI分析結果のDDS検査**\n\n"
+                    if v3 and len(v3) > 0:
+                        policy_names = [v["name"] for v in v3]
+                        info_msg += f"🚨 検出された違反: {', '.join(policy_names)}\n\n"
+                    else:
+                        info_msg += "✅ 違反は検出されませんでした\n\n"
+                    info_msg += "---\n"
+                    info_msg += f"**分析結果:**\n```\n{info_result}\n```"
+                    
+                    # ブロックされていた場合はその情報も追加
+                    if st.session_state.blocked_content:
+                        info_msg = "🚫 **（送信はブロックされました）**\n\n" + info_msg
+                    
+                    msg_data = {
+                        "role": "assistant",
+                        "content": info_msg,
+                        "violations": v3,
+                        "is_info_check": True
+                    }
+                    if info_dds_response:
+                        msg_data["dds_response"] = info_dds_response
+                    st.session_state.messages.append(msg_data)
+                    
+                    with st.chat_message("assistant"):
+                        if st.session_state.blocked_content:
+                            st.warning("🚫 送信はブロックされましたが、情報チェックAI分析結果は以下です")
+                        st.markdown(info_msg)
+                        if info_dds_response:
+                            with st.expander("📋 DDSレスポンス詳細", expanded=False):
+                                st.markdown(info_dds_response)
+            else:
+                st.warning("⚠️ 情報チェックAIの結果がないため、DDSへの送信をスキップしました")
             
             st.success(f"✅ **Inlineモード完了** (合計: {time.time() - st.session_state.process_start_time:.2f}秒)")
             add_debug_log("Inline-完了", f"全ての処理が完了しました", "success", time.time() - st.session_state.process_start_time)
