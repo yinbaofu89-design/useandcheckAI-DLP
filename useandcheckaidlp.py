@@ -231,17 +231,7 @@ def create_zip_for_dds(info_check_result, file_data, filename, user_message, sen
 # ==================== ZIPファイルをDDSに送信する関数（新規追加） ====================
 def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_block_id=None):
     """
-    ZIPファイルをDDSに送信する
-    
-    Args:
-        zip_data: ZIPファイルのバイナリデータ（BytesIO）
-        dds_url: DDSのURL
-        verify_ssl: SSL検証フラグ
-        source_type: 送信元タイプ
-        content_block_id: コンテンツブロックID
-    
-    Returns:
-        violations, request_id, response_data, error_info, elapsed
+    ZIPファイルをDDSに送信する関数（ファイル名を正しく設定）
     """
     start_time = time.time()
     
@@ -270,14 +260,16 @@ def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_bl
             "subject": {
                 "contentBlockId": "subject-001",
                 "mimeType": "text/plain",
-                "data": base64.b64encode(f"ZIPファイル: 情報チェックAI分析結果 + 元の内容".encode('utf-8')).decode('utf-8')
+                "data": base64.b64encode(
+                    f"ZIP: 情報チェックAI分析結果 + 元の内容 (トランザクション: {st.session_state.txid})".encode('utf-8')
+                ).decode('utf-8')
             },
             "attachments": [
                 {
                     "contentBlockId": block_id,
                     "mimeType": "application/zip",
                     "data": b64_data,
-                    "name": "info_check_package.zip"
+                    "name": f"info_check_package_{st.session_state.txid[:8]}.zip"  # ← ファイル名を設定！
                 }
             ]
         }
