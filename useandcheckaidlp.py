@@ -482,15 +482,21 @@ def build_information_check_prompt(check_items):
 - 上記は出力形式の例です。実際に含まれている項目だけを出力してください。
 - 含まれていない項目は絶対に出力しないでください。"""
 
-# ==================== ファイル内容抽出関数 ====================
+# ==================== ファイル内容抽出関数（空ファイル対応） ====================
 def extract_file_content(file_bytes, filename, max_chars=5000):
-    """ファイルからテキスト内容を抽出する"""
+    """ファイルからテキスト内容を抽出する（空ファイル対応）"""
+    # ファイルが空かチェック
+    if not file_bytes or len(file_bytes) == 0:
+        return "（空ファイルです）"
+    
     mime = get_mime_type(filename)
     
     # テキストファイル
     if mime.startswith("text/") or filename.lower().endswith((".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")):
         try:
             decoded = file_bytes.decode("utf-8", errors="ignore")
+            if not decoded.strip():
+                return "（空のテキストファイルです）"
             if len(decoded) > max_chars:
                 return decoded[:max_chars] + f"\n... (省略: {len(decoded) - max_chars}文字)"
             return decoded
@@ -507,6 +513,8 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
             
             doc = docx.Document(io.BytesIO(file_bytes))
             text = "\n".join([para.text for para in doc.paragraphs])
+            if not text.strip():
+                return "（空のWordファイルです）"
             for table in doc.tables:
                 for row in table.rows:
                     for cell in row.cells:
@@ -533,6 +541,8 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
             text = ""
             for page in reader.pages:
                 text += page.extract_text() + "\n"
+            if not text.strip():
+                return "（空のPDFファイルです）"
             if len(text) > max_chars:
                 return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
             return text
@@ -555,6 +565,8 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
                     row_text = " ".join([str(cell) for cell in row if cell is not None])
                     if row_text:
                         text += row_text + "\n"
+            if not text.strip():
+                return "（空のExcelファイルです）"
             if len(text) > max_chars:
                 return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
             return text
@@ -565,25 +577,43 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
     else:
         return f"（バイナリファイル: {filename}、{len(file_bytes)}バイト）"
 
-# ==================== 情報チェックAI実行 ====================
+# ==================== 情報チェックAI実行（会話履歴に依存しない） ====================
 def run_information_check_ai(file_bytes, filename, user_message, check_items, additional_context=None):
+    """
+    情報チェックAIを実行する（会話履歴に依存しない）
+    
+    Args:
+        file_bytes: ファイルデータ
+        filename: ファイル名
+        user_message: ユーザーメッセージ
+        check_items: チェック項目リスト
+        additional_context: 追加のコンテキスト情報
+    """
     prompt = build_information_check_prompt(check_items)
     
+    # システムメッセージにプロンプトを設定（会話履歴をリセット）
     messages = [
         {"role": "system", "content": prompt},
         {"role": "user", "content": "以下の内容を分析し、該当する情報があれば出力してください。"}
     ]
     
     user_content = ""
+    
+    # ユーザーメッセージ
     if user_message:
         user_content += f"【メッセージ】\n{user_message}\n\n"
     
+    # ファイル内容（実際のファイルデータを確認）
     if file_bytes and filename:
         user_content += f"【ファイル: {filename}】\n"
         file_text = extract_file_content(file_bytes, filename)
         user_content += file_text
         user_content += "\n"
+    else:
+        # ファイルがない場合は明示的に通知
+        user_content += "【ファイル】\nファイルはアップロードされていません。\n\n"
     
+    # 追加コンテキスト
     if additional_context:
         user_content += "\n【追加コンテキスト情報】\n"
         user_content += additional_context
@@ -592,6 +622,10 @@ def run_information_check_ai(file_bytes, filename, user_message, check_items, ad
         messages.append({"role": "user", "content": user_content})
     else:
         messages.append({"role": "user", "content": "分析する内容がありません。"})
+    
+    # デバッグ用に送信内容をログに記録
+    if st.session_state.debug_mode:
+        add_debug_log("情報チェックAI送信", f"分析内容: {user_content[:500]}...", "info")
     
     return call_ai_api(messages, max_tokens=500)
 
@@ -844,7 +878,7 @@ def call_ai_with_file(messages, file_bytes=None, filename=None, mime_type=None, 
                     break
         return call_ai_api(messages, max_tokens)
 
-# ==================== DDS送信関数（従来のテキスト送信用） ====================
+# ==================== DDS送信関数 ====================
 def send_detection_request(file_obj, source_type, dds_url, verify_ssl, data_type="DIM", content_block_id=None, mime_type=None):
     start_time = time.time()
     
@@ -1020,12 +1054,17 @@ def get_content_for_dds(file_data, filename, user_message, send_target):
         content += file_text
     return content
 
-# ==================== 履歴クリア関数 ====================
+# ==================== 履歴クリア関数（ファイルデータもクリア） ====================
 def clear_conversation():
     st.session_state.messages = []
     st.session_state.info_check_results = []
     st.session_state.txid = str(uuid.uuid4())
     st.session_state.blocked_content = False
+    st.session_state.file_data = None
+    st.session_state.filename = None
+    st.session_state.file_checked = False
+    st.session_state.file_violations = []
+    st.session_state.file_approved = False
 
 # ==================== DDSレスポンス整形関数 ====================
 def format_dds_response(response_data, violations, request_id):
@@ -1061,21 +1100,48 @@ def format_dds_response(response_data, violations, request_id):
     
     return "\n".join(lines)
 
-# ==================== AI回答をDDSでチェックする関数 ====================
+# ==================== AI回答をDDSでチェックする関数（ZIP対応） ====================
 def check_ai_response_with_dds(ai_response, step_name):
+    """
+    AIの回答をDDSに送信してチェックする（ZIP対応）
+    
+    Args:
+        ai_response: AIの回答（テキスト または ZIPのBytesIO）
+        step_name: デバッグログ用のステップ名
+    
+    Returns:
+        violations, request_id, response_data, error_info, elapsed
+    """
     start_time = time.time()
     
     add_debug_log(f"{step_name}-AI回答チェック", "AI回答をDDSに送信して検査中...", "info")
     
-    ai_message_wrapper = MessageWrapper(ai_response, "ai_response")
-    violations, request_id, response_data, error_info, elapsed = send_detection_request(
-        ai_message_wrapper,
-        "message",
-        st.session_state.dds_url,
-        st.session_state.verify_ssl,
-        data_type="DIM",
-        content_block_id="ai-response-check-001"
-    )
+    # ZIPファイルかどうかをチェック
+    is_zip = False
+    if isinstance(ai_response, BytesIO) or (hasattr(ai_response, 'getvalue') and callable(ai_response.getvalue)):
+        is_zip = True
+        add_debug_log(f"{step_name}-AI回答チェック", "ZIPファイルとして検出", "info")
+    
+    if is_zip:
+        # ZIPファイルとして送信
+        violations, request_id, response_data, error_info, elapsed = send_zip_to_dds(
+            zip_data=ai_response,
+            dds_url=st.session_state.dds_url,
+            verify_ssl=st.session_state.verify_ssl,
+            source_type="zip",
+            content_block_id="ai-response-check-001"
+        )
+    else:
+        # テキストとして送信
+        ai_message_wrapper = MessageWrapper(ai_response, "ai_response")
+        violations, request_id, response_data, error_info, elapsed = send_detection_request(
+            ai_message_wrapper,
+            "message",
+            st.session_state.dds_url,
+            st.session_state.verify_ssl,
+            data_type="DIM",
+            content_block_id="ai-response-check-001"
+        )
     
     if violations is None:
         violations = []
@@ -1331,6 +1397,26 @@ with st.sidebar:
     st.caption(f"📡 プロバイダー: **{st.session_state.get('selected_provider', '未設定')}**")
     st.caption(f"🤖 モデル: **{st.session_state.get('ai_model', '未設定')}**")
 
+# ==================== ファイルが実際に内容を持っているかチェックする関数 ====================
+def has_file_content(file_data, filename):
+    """ファイルが実際に内容を持っているかチェック"""
+    if not file_data or len(file_data) == 0:
+        return False
+    
+    # テキストファイルの場合は内容が空でないかチェック
+    mime = get_mime_type(filename)
+    if mime.startswith("text/") or filename.lower().endswith((".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")):
+        try:
+            content = file_data.decode('utf-8', errors='ignore')
+            if content.strip():
+                return True
+            return False
+        except:
+            return len(file_data) > 0
+    else:
+        # バイナリファイルはサイズで判断
+        return len(file_data) > 0
+
 # ==================== メインコンテンツ ====================
 show_debug = st.session_state.get("show_debug_panel", False) and len(st.session_state.debug_logs) > 0
 
@@ -1450,6 +1536,13 @@ with main_col:
             st.error("❌ メッセージとファイルの両方がありません")
             st.stop()
         
+        # ファイルが空かチェック
+        file_is_empty = False
+        if file_data and filename:
+            if not has_file_content(file_data, filename):
+                file_is_empty = True
+                st.warning(f"⚠️ アップロードされたファイル「{filename}」は空です。")
+        
         # ==================== Monitorモード ====================
         if st.session_state.operation_mode == "Monitor":
             st.info(f"📊 **Monitorモード**で実行します")
@@ -1517,7 +1610,7 @@ with main_col:
             status_placeholder.info(f"⏳ AI応答を待っています...")
             
             with st.spinner(f"🤖 {st.session_state.ai_model} に送信中..."):
-                if file_data and filename:
+                if file_data and filename and not file_is_empty:
                     ai_response, ai_elapsed = call_ai_with_file(
                         ai_messages,
                         file_bytes=file_data,
@@ -1679,8 +1772,8 @@ with main_col:
                     additional_context += f"- 違反検出: なし\n"
                 
                 info_result, info_elapsed = run_information_check_ai(
-                    file_data,
-                    filename,
+                    file_data if not file_is_empty else None,
+                    filename if not file_is_empty else None,
                     user_input,
                     info_items_enabled,
                     additional_context=additional_context
@@ -1713,8 +1806,8 @@ with main_col:
                 # ZIP作成
                 zip_data = create_zip_for_dds(
                     info_check_result=info_result,
-                    file_data=file_data,
-                    filename=filename,
+                    file_data=file_data if not file_is_empty else None,
+                    filename=filename if not file_is_empty else None,
                     user_message=user_input,
                     send_target=send_target
                 )
@@ -1722,7 +1815,7 @@ with main_col:
                 zip_size = len(zip_data.getvalue())
                 st.info(f"📦 ZIP作成完了: {zip_size/1024:.1f} KB")
                 
-                # ZIPをDDSに送信（修正版）
+                # ZIPをDDSに送信
                 v3, request_id3, response_data3, error_info3, elapsed6 = send_zip_to_dds(
                     zip_data=zip_data,
                     dds_url=st.session_state.dds_url,
@@ -1757,8 +1850,10 @@ with main_col:
                     zip_contents.append(f"  - info_check_result.txt: 情報チェックAI分析結果")
                     if user_input and send_target in ["message", "both"]:
                         zip_contents.append(f"  - user_message.txt: ユーザーメッセージ")
-                    if file_data and filename and send_target in ["file", "both"]:
+                    if file_data and filename and send_target in ["file", "both"] and not file_is_empty:
                         zip_contents.append(f"  - original_{filename}: 元のファイル")
+                    if file_is_empty:
+                        zip_contents.append(f"  - （元のファイルは空のため省略）")
                     zip_contents.append("")
                     
                     info_msg = f"📊 **情報チェックAI分析結果（ZIPでDDS送信）**\n\n"
@@ -1909,7 +2004,7 @@ with main_col:
             status_placeholder.info(f"⏳ AI応答を待っています...")
             
             with st.spinner(f"🤖 {st.session_state.ai_model} に送信中..."):
-                if file_data and filename:
+                if file_data and filename and not file_is_empty:
                     ai_response, ai_elapsed = call_ai_with_file(
                         ai_messages,
                         file_bytes=file_data,
@@ -2038,8 +2133,8 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                         additional_context += f"- チェックID: {ai_check_request_id}\n"
                 
                 info_result, info_elapsed = run_information_check_ai(
-                    file_data,
-                    filename,
+                    file_data if not file_is_empty else None,
+                    filename if not file_is_empty else None,
                     user_input,
                     info_items_enabled,
                     additional_context=additional_context
@@ -2073,8 +2168,8 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                 
                 zip_data = create_zip_for_dds(
                     info_check_result=info_result,
-                    file_data=file_data,
-                    filename=filename,
+                    file_data=file_data if not file_is_empty else None,
+                    filename=filename if not file_is_empty else None,
                     user_message=user_input,
                     send_target=send_target
                 )
@@ -2115,8 +2210,10 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                     zip_contents.append(f"  - info_check_result.txt: 情報チェックAI分析結果")
                     if user_input and send_target in ["message", "both"]:
                         zip_contents.append(f"  - user_message.txt: ユーザーメッセージ")
-                    if file_data and filename and send_target in ["file", "both"]:
+                    if file_data and filename and send_target in ["file", "both"] and not file_is_empty:
                         zip_contents.append(f"  - original_{filename}: 元のファイル")
+                    if file_is_empty:
+                        zip_contents.append(f"  - （元のファイルは空のため省略）")
                     zip_contents.append("")
                     
                     info_msg = f"📊 **情報チェックAI分析結果（ZIPでDDS送信）**\n\n"
