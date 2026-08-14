@@ -278,7 +278,7 @@ def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_bl
                     "contentBlockId": block_id,
                     "mimeType": "application/zip",
                     "data": b64_data,
-                    "name": f"info_check_package_{st.session_state.txid[:8]}.zip"
+                    "fileName": f"info_check_package_{st.session_state.txid[:8]}.zip"  # ← name → fileName に修正
                 }
             ]
         }
@@ -875,7 +875,7 @@ def send_detection_request(file_obj, source_type, dds_url, verify_ssl, data_type
                         "contentBlockId": block_id,
                         "mimeType": file_mime,
                         "data": b64_data,
-                        "name": file_obj.name
+                        "fileName": file_obj.name  # ← name → fileName に修正
                     }
                 ]
             }
