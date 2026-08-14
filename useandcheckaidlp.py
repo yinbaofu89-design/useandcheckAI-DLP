@@ -227,20 +227,10 @@ def create_zip_for_dds(info_check_result, file_data, filename, user_message, sen
     zip_buffer.seek(0)
     return zip_buffer
 
-# ==================== ZIPファイルをDDSに送信する関数（PowerShellと同じ構造） ====================
+# ==================== ZIPファイルをDDSに送信する関数 ====================
 def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_block_id=None):
     """
     ZIPファイルをDDSに送信する（PowerShellと同じ構造）
-    
-    Args:
-        zip_data: ZIPファイルのバイナリデータ（BytesIO）
-        dds_url: DDSのURL
-        verify_ssl: SSL検証フラグ
-        source_type: 送信元タイプ
-        content_block_id: コンテンツブロックID
-    
-    Returns:
-        violations, request_id, response_data, error_info, elapsed
     """
     start_time = time.time()
     
@@ -249,11 +239,6 @@ def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_bl
         file_bytes = zip_data.read()
         b64_data = base64.b64encode(file_bytes).decode('utf-8')
         
-        # ============================================================
-        # PowerShellと同じ構造にする
-        # ============================================================
-        
-        # subject.data: ファイル名の説明（PowerShellと同じ）
         subject_text = f"ZIP file: info_check_package_{st.session_state.txid[:8]}.zip"
         subject_base64 = base64.b64encode(subject_text.encode('utf-8')).decode('utf-8')
         
@@ -270,11 +255,8 @@ def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_bl
         if st.session_state.get("client_user"):
             context.append({"name": "client.user.id", "value": [st.session_state.client_user]})
         
-        block_id = content_block_id or "attachment-001"  # PowerShellと同じID
+        block_id = content_block_id or "attachment-001"
         
-        # ============================================================
-        # PowerShellと同じ構造のリクエスト
-        # ============================================================
         request_data = {
             "context": context,
             "subject": {
@@ -485,13 +467,11 @@ def build_information_check_prompt(check_items):
 # ==================== ファイル内容抽出関数（空ファイル対応） ====================
 def extract_file_content(file_bytes, filename, max_chars=5000):
     """ファイルからテキスト内容を抽出する（空ファイル対応）"""
-    # ファイルが空かチェック
     if not file_bytes or len(file_bytes) == 0:
         return "（空ファイルです）"
     
     mime = get_mime_type(filename)
     
-    # テキストファイル
     if mime.startswith("text/") or filename.lower().endswith((".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")):
         try:
             decoded = file_bytes.decode("utf-8", errors="ignore")
@@ -503,7 +483,6 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
         except:
             return f"（バイナリファイル: {len(file_bytes)}バイト）"
     
-    # Word文書 (.docx)
     elif filename.lower().endswith(".docx"):
         try:
             try:
@@ -525,11 +504,9 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
         except Exception as e:
             return f"（Word抽出エラー: {e}）"
     
-    # 古いWord文書 (.doc)
     elif filename.lower().endswith(".doc"):
         return f"（Wordファイル: {filename}、{len(file_bytes)}バイト - .doc形式はpython-docx非対応）"
     
-    # PDFファイル
     elif filename.lower().endswith(".pdf"):
         try:
             try:
@@ -549,7 +526,6 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
         except Exception as e:
             return f"（PDF抽出エラー: {e}）"
     
-    # Excelファイル (.xlsx)
     elif filename.lower().endswith((".xlsx", ".xls")):
         try:
             try:
@@ -573,25 +549,13 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
         except Exception as e:
             return f"（Excel抽出エラー: {e}）"
     
-    # その他のバイナリファイル
     else:
         return f"（バイナリファイル: {filename}、{len(file_bytes)}バイト）"
 
-# ==================== 情報チェックAI実行（会話履歴に依存しない） ====================
+# ==================== 情報チェックAI実行 ====================
 def run_information_check_ai(file_bytes, filename, user_message, check_items, additional_context=None):
-    """
-    情報チェックAIを実行する（会話履歴に依存しない）
-    
-    Args:
-        file_bytes: ファイルデータ
-        filename: ファイル名
-        user_message: ユーザーメッセージ
-        check_items: チェック項目リスト
-        additional_context: 追加のコンテキスト情報
-    """
     prompt = build_information_check_prompt(check_items)
     
-    # システムメッセージにプロンプトを設定（会話履歴をリセット）
     messages = [
         {"role": "system", "content": prompt},
         {"role": "user", "content": "以下の内容を分析し、該当する情報があれば出力してください。"}
@@ -599,21 +563,17 @@ def run_information_check_ai(file_bytes, filename, user_message, check_items, ad
     
     user_content = ""
     
-    # ユーザーメッセージ
     if user_message:
         user_content += f"【メッセージ】\n{user_message}\n\n"
     
-    # ファイル内容（実際のファイルデータを確認）
     if file_bytes and filename:
         user_content += f"【ファイル: {filename}】\n"
         file_text = extract_file_content(file_bytes, filename)
         user_content += file_text
         user_content += "\n"
     else:
-        # ファイルがない場合は明示的に通知
         user_content += "【ファイル】\nファイルはアップロードされていません。\n\n"
     
-    # 追加コンテキスト
     if additional_context:
         user_content += "\n【追加コンテキスト情報】\n"
         user_content += additional_context
@@ -623,7 +583,6 @@ def run_information_check_ai(file_bytes, filename, user_message, check_items, ad
     else:
         messages.append({"role": "user", "content": "分析する内容がありません。"})
     
-    # デバッグ用に送信内容をログに記録
     if st.session_state.debug_mode:
         add_debug_log("情報チェックAI送信", f"分析内容: {user_content[:500]}...", "info")
     
@@ -860,7 +819,7 @@ def call_openai_with_file(messages, file_bytes=None, filename=None, mime_type=No
         st.error(f"❌ OpenAIファイル送信エラー: {e}")
         return None, time.time() - start_time
 
-# ==================== AIファイル送信（統合） ====================
+# ==================== AIファイル送信 ====================
 def call_ai_with_file(messages, file_bytes=None, filename=None, mime_type=None, max_tokens=200):
     provider = st.session_state.selected_provider
     
@@ -878,8 +837,152 @@ def call_ai_with_file(messages, file_bytes=None, filename=None, mime_type=None, 
                     break
         return call_ai_api(messages, max_tokens)
 
-# ==================== DDS送信関数 ====================
+# ==================== DDS送信関数（改善版：ファイルをattachmentsとして送信） ====================
+def send_detection_request_with_attachments(file_data, filename, user_message, dds_url, verify_ssl, 
+                                            data_type="DIM", content_block_id=None):
+    """
+    ファイルとメッセージをDDSに送信する（ファイルはattachmentsとして送信）
+    
+    Args:
+        file_data: ファイルのバイナリデータ
+        filename: ファイル名
+        user_message: ユーザーメッセージ
+        dds_url: DDSのURL
+        verify_ssl: SSL検証フラグ
+        data_type: データタイプ
+        content_block_id: コンテンツブロックID
+    
+    Returns:
+        violations, request_id, response_data, error_info, elapsed
+    """
+    start_time = time.time()
+    
+    try:
+        context = [
+            {"name": "common.dataType", "value": [data_type]},
+            {"name": "common.application", "value": [st.session_state.get("dlp_application", "securlet.box")]},
+            {"name": "common.transactionId", "value": [st.session_state.txid]},
+            {"name": "common.filter", "value": [f["id"] for f in st.session_state.filters]},
+            {"name": "common.expectActionsAck", "value": ["true"]},
+        ]
+        
+        if st.session_state.get("client_domain"):
+            context.append({"name": "client.domain", "value": [st.session_state.client_domain]})
+        if st.session_state.get("client_user"):
+            context.append({"name": "client.user.id", "value": [st.session_state.client_user]})
+        
+        # subject: メッセージを設定
+        block_id = content_block_id or "subject-001"
+        subject_text = user_message if user_message else "（メッセージなし）"
+        subject_base64 = base64.b64encode(subject_text.encode('utf-8')).decode('utf-8')
+        
+        request_data = {
+            "context": context,
+            "subject": {
+                "contentBlockId": block_id,
+                "mimeType": "text/plain",
+                "data": subject_base64
+            }
+        }
+        
+        # ファイルがある場合はattachmentsとして追加
+        if file_data and filename:
+            file_mime = get_mime_type(filename)
+            b64_data = base64.b64encode(file_data).decode('utf-8')
+            attachment_block_id = f"attachment-{st.session_state.txid[:8]}"
+            
+            request_data["attachments"] = [
+                {
+                    "contentBlockId": attachment_block_id,
+                    "mimeType": file_mime,
+                    "data": b64_data,
+                    "fileName": filename
+                }
+            ]
+        
+        json_data = json.dumps(request_data, ensure_ascii=False)
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        if st.session_state.debug_mode:
+            add_debug_log("DDSリクエスト（改善版）", f"リクエスト送信 (ファイル: {filename if filename else 'なし'})", "info", 0, {
+                "url": dds_url,
+                "has_file": bool(file_data and filename),
+                "file_name": filename,
+                "message_length": len(user_message) if user_message else 0,
+                "request_data": request_data
+            })
+        
+        response = requests.post(
+            dds_url,
+            data=json_data,
+            headers=headers,
+            verify=not verify_ssl,
+            timeout=60
+        )
+        
+        elapsed = time.time() - start_time
+        
+        try:
+            response_json = response.json()
+            
+            if st.session_state.debug_mode:
+                add_debug_log("DDSレスポンス（改善版）", f"ステータス: {response.status_code}", 
+                             "success" if response.status_code == 201 else "error", elapsed, {
+                                "status_code": response.status_code,
+                                "response": response_json
+                            })
+            
+            if response.status_code == 201:
+                violations = response_json.get("violation", [])
+                if violations is None:
+                    violations = []
+                request_id = response_json.get("requestId")
+                return violations, request_id, response_json, None, elapsed
+            else:
+                error_info = {
+                    "status_code": response.status_code,
+                    "response_text": response.text,
+                    "headers": dict(response.headers)
+                }
+                return [], None, None, error_info, elapsed
+                
+        except Exception as e:
+            error_info = {
+                "status_code": response.status_code,
+                "response_text": response.text,
+                "error": str(e)
+            }
+            return [], None, None, error_info, elapsed
+            
+    except requests.exceptions.ConnectionError as e:
+        error_info = {
+            "error_type": "ConnectionError",
+            "message": str(e),
+            "dds_url": dds_url
+        }
+        return [], None, None, error_info, time.time() - start_time
+    except requests.exceptions.Timeout as e:
+        error_info = {
+            "error_type": "Timeout",
+            "message": str(e)
+        }
+        return [], None, None, error_info, time.time() - start_time
+    except Exception as e:
+        error_info = {
+            "error_type": "Exception",
+            "message": str(e)
+        }
+        import traceback
+        error_info["traceback"] = traceback.format_exc()
+        return [], None, None, error_info, time.time() - start_time
+
+# ==================== 従来のDDS送信関数（メッセージのみ） ====================
 def send_detection_request(file_obj, source_type, dds_url, verify_ssl, data_type="DIM", content_block_id=None, mime_type=None):
+    """従来のDDS送信関数（メッセージのみ）"""
     start_time = time.time()
     
     try:
@@ -900,46 +1003,17 @@ def send_detection_request(file_obj, source_type, dds_url, verify_ssl, data_type
         if st.session_state.get("client_user"):
             context.append({"name": "client.user.id", "value": [st.session_state.client_user]})
         
-        if source_type == "file":
-            file_mime = get_mime_type(file_obj.name)
-            if hasattr(file_obj, 'type') and file_obj.type and file_obj.type != 'application/octet-stream':
-                file_mime = file_obj.type
-            
-            block_id = re.sub(r'[^a-zA-Z0-9-]', '-', file_obj.name) + "-001"
-            
-            # subject.data: ファイル名の説明
-            subject_text = f"File: {file_obj.name}"
-            subject_base64 = base64.b64encode(subject_text.encode('utf-8')).decode('utf-8')
-            
-            request_data = {
-                "context": context,
-                "subject": {
-                    "contentBlockId": "subject-001",
-                    "mimeType": "text/plain",
-                    "data": subject_base64
-                },
-                "attachments": [
-                    {
-                        "contentBlockId": block_id,
-                        "mimeType": file_mime,
-                        "data": b64_data,
-                        "fileName": file_obj.name
-                    }
-                ]
+        block_id = content_block_id or "message-001"
+        mime = mime_type or "text/plain"
+        
+        request_data = {
+            "context": context,
+            "subject": {
+                "contentBlockId": block_id,
+                "mimeType": mime,
+                "data": b64_data
             }
-            
-        else:
-            block_id = content_block_id or "message-001"
-            mime = mime_type or "text/plain"
-            
-            request_data = {
-                "context": context,
-                "subject": {
-                    "contentBlockId": block_id,
-                    "mimeType": "text/plain",
-                    "data": b64_data
-                }
-            }
+        }
         
         json_data = json.dumps(request_data, ensure_ascii=False)
         
@@ -1054,7 +1128,7 @@ def get_content_for_dds(file_data, filename, user_message, send_target):
         content += file_text
     return content
 
-# ==================== 履歴クリア関数（ファイルデータもクリア） ====================
+# ==================== 履歴クリア関数 ====================
 def clear_conversation():
     st.session_state.messages = []
     st.session_state.info_check_results = []
@@ -1100,18 +1174,8 @@ def format_dds_response(response_data, violations, request_id):
     
     return "\n".join(lines)
 
-# ==================== AI回答をDDSでチェックする関数（ZIP対応） ====================
+# ==================== AI回答をDDSでチェックする関数 ====================
 def check_ai_response_with_dds(ai_response, step_name):
-    """
-    AIの回答をDDSに送信してチェックする（ZIP対応）
-    
-    Args:
-        ai_response: AIの回答（テキスト または ZIPのBytesIO）
-        step_name: デバッグログ用のステップ名
-    
-    Returns:
-        violations, request_id, response_data, error_info, elapsed
-    """
     start_time = time.time()
     
     add_debug_log(f"{step_name}-AI回答チェック", "AI回答をDDSに送信して検査中...", "info")
@@ -1123,7 +1187,6 @@ def check_ai_response_with_dds(ai_response, step_name):
         add_debug_log(f"{step_name}-AI回答チェック", "ZIPファイルとして検出", "info")
     
     if is_zip:
-        # ZIPファイルとして送信
         violations, request_id, response_data, error_info, elapsed = send_zip_to_dds(
             zip_data=ai_response,
             dds_url=st.session_state.dds_url,
@@ -1132,7 +1195,6 @@ def check_ai_response_with_dds(ai_response, step_name):
             content_block_id="ai-response-check-001"
         )
     else:
-        # テキストとして送信
         ai_message_wrapper = MessageWrapper(ai_response, "ai_response")
         violations, request_id, response_data, error_info, elapsed = send_detection_request(
             ai_message_wrapper,
@@ -1150,6 +1212,24 @@ def check_ai_response_with_dds(ai_response, step_name):
                  "warning" if violations else "success", elapsed, response_data)
     
     return violations, request_id, response_data, error_info, elapsed
+
+# ==================== ファイルが実際に内容を持っているかチェックする関数 ====================
+def has_file_content(file_data, filename):
+    """ファイルが実際に内容を持っているかチェック"""
+    if not file_data or len(file_data) == 0:
+        return False
+    
+    mime = get_mime_type(filename)
+    if mime.startswith("text/") or filename.lower().endswith((".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")):
+        try:
+            content = file_data.decode('utf-8', errors='ignore')
+            if content.strip():
+                return True
+            return False
+        except:
+            return len(file_data) > 0
+    else:
+        return len(file_data) > 0
 
 # ==================== サイドバー設定 ====================
 with st.sidebar:
@@ -1397,26 +1477,6 @@ with st.sidebar:
     st.caption(f"📡 プロバイダー: **{st.session_state.get('selected_provider', '未設定')}**")
     st.caption(f"🤖 モデル: **{st.session_state.get('ai_model', '未設定')}**")
 
-# ==================== ファイルが実際に内容を持っているかチェックする関数 ====================
-def has_file_content(file_data, filename):
-    """ファイルが実際に内容を持っているかチェック"""
-    if not file_data or len(file_data) == 0:
-        return False
-    
-    # テキストファイルの場合は内容が空でないかチェック
-    mime = get_mime_type(filename)
-    if mime.startswith("text/") or filename.lower().endswith((".txt", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md")):
-        try:
-            content = file_data.decode('utf-8', errors='ignore')
-            if content.strip():
-                return True
-            return False
-        except:
-            return len(file_data) > 0
-    else:
-        # バイナリファイルはサイズで判断
-        return len(file_data) > 0
-
 # ==================== メインコンテンツ ====================
 show_debug = st.session_state.get("show_debug_panel", False) and len(st.session_state.debug_logs) > 0
 
@@ -1543,34 +1603,37 @@ with main_col:
                 file_is_empty = True
                 st.warning(f"⚠️ アップロードされたファイル「{filename}」は空です。")
         
+        # 送信するメッセージとファイルを準備
+        send_message = user_input if send_target in ["message", "both"] else ""
+        send_file_data = file_data if send_target in ["file", "both"] and not file_is_empty else None
+        send_filename = filename if send_target in ["file", "both"] and not file_is_empty else None
+        
         # ==================== Monitorモード ====================
         if st.session_state.operation_mode == "Monitor":
             st.info(f"📊 **Monitorモード**で実行します")
-            st.info("🔄 1つ目のリクエスト: 元の内容 → DDS → AI → AI回答DDSチェック → DDS再検査")
+            st.info("🔄 1つ目のリクエスト: 元の内容 → DDS（ファイルはattachments） → AI → AI回答DDSチェック → DDS再検査")
             st.info("🔄 2つ目のリクエスト: 情報チェックAI（ZIPでDDS送信）")
             
             # ============================================================
             # 1つ目のリクエスト（元の内容）
             # ============================================================
             
-            # ---- ステップ1: 元の内容をDDSに送信 ----
+            # ---- ステップ1: 元の内容をDDSに送信（改善版：ファイルはattachments） ----
             step1_start = time.time()
-            add_debug_log("Monitor-1-ステップ1", "元の内容をDDSに送信して検査中...", "info")
-            status1 = st.info("🔍 [Monitor-1-1] 元の内容をDDSに送信して検査中...")
+            add_debug_log("Monitor-1-ステップ1", "元の内容をDDSに送信（改善版）...", "info")
+            status1 = st.info("🔍 [Monitor-1-1] 元の内容をDDSに送信（ファイルはattachments）...")
             
-            content_for_dds = get_content_for_dds(file_data, filename, user_input, send_target)
-            if not content_for_dds.strip():
-                st.error("❌ 送信するコンテンツがありません")
-                st.stop()
+            # メッセージがない場合はダミーテキストを設定
+            subject_message = send_message if send_message else "（メッセージなし）"
             
-            content_wrapper = MessageWrapper(content_for_dds, "content")
-            violations, request_id, response_data, error_info, elapsed1 = send_detection_request(
-                content_wrapper,
-                "message",
-                st.session_state.dds_url,
-                st.session_state.verify_ssl,
+            violations, request_id, response_data, error_info, elapsed1 = send_detection_request_with_attachments(
+                file_data=send_file_data,
+                filename=send_filename,
+                user_message=subject_message,
+                dds_url=st.session_state.dds_url,
+                verify_ssl=st.session_state.verify_ssl,
                 data_type="DIM",
-                content_block_id="content-001"
+                content_block_id="subject-001"
             )
             
             if violations is None:
@@ -1610,12 +1673,12 @@ with main_col:
             status_placeholder.info(f"⏳ AI応答を待っています...")
             
             with st.spinner(f"🤖 {st.session_state.ai_model} に送信中..."):
-                if file_data and filename and not file_is_empty:
+                if send_file_data and send_filename:
                     ai_response, ai_elapsed = call_ai_with_file(
                         ai_messages,
-                        file_bytes=file_data,
-                        filename=filename,
-                        mime_type=get_mime_type(filename),
+                        file_bytes=send_file_data,
+                        filename=send_filename,
+                        mime_type=get_mime_type(send_filename),
                         max_tokens=200
                     )
                 else:
@@ -1803,7 +1866,6 @@ with main_col:
                 add_debug_log("Monitor-2-ステップ2", "ZIPファイルを作成してDDSに送信中...", "info")
                 st.info("📦 [Monitor-2-2] ZIPファイルを作成してDDSに送信中...")
                 
-                # ZIP作成
                 zip_data = create_zip_for_dds(
                     info_check_result=info_result,
                     file_data=file_data if not file_is_empty else None,
@@ -1815,7 +1877,6 @@ with main_col:
                 zip_size = len(zip_data.getvalue())
                 st.info(f"📦 ZIP作成完了: {zip_size/1024:.1f} KB")
                 
-                # ZIPをDDSに送信
                 v3, request_id3, response_data3, error_info3, elapsed6 = send_zip_to_dds(
                     zip_data=zip_data,
                     dds_url=st.session_state.dds_url,
@@ -1844,7 +1905,6 @@ with main_col:
                         st.success("✅ 情報チェックAI分析結果（ZIP）にポリシー違反はありません")
                         add_debug_log("Monitor-2-ステップ3", "ZIPにポリシー違反なし", "success", elapsed6)
                     
-                    # ZIP内の内容を説明するメッセージ
                     zip_contents = []
                     zip_contents.append("📦 **ZIPファイル内容:**")
                     zip_contents.append(f"  - info_check_result.txt: 情報チェックAI分析結果")
@@ -1890,7 +1950,7 @@ with main_col:
             st.success(f"✅ **Monitorモード完了** (合計: {time.time() - st.session_state.process_start_time:.2f}秒)")
             add_debug_log("Monitor-完了", f"全ての処理が完了しました", "success", time.time() - st.session_state.process_start_time)
         
-        # ==================== Inlineモード（st.stop() 実装版） ====================
+        # ==================== Inlineモード ====================
         else:
             st.info(f"📊 **Inlineモード**で実行します")
             st.info("🔒 送信内容をDDSでチェックし、違反があれば処理を停止します")
@@ -1900,22 +1960,19 @@ with main_col:
             # ステップ1: 元の内容をDDSに送信（ブロックチェック）
             # ============================================================
             step1_start = time.time()
-            add_debug_log("Inline-ステップ1", "元の内容をDDSに送信してブロックチェック...", "info")
-            status1 = st.info("🔍 [Inline-1] 元の内容をDDSに送信してブロックチェック中...")
+            add_debug_log("Inline-ステップ1", "元の内容をDDSに送信（改善版）...", "info")
+            status1 = st.info("🔍 [Inline-1] 元の内容をDDSに送信（ファイルはattachments）...")
             
-            content_for_dds = get_content_for_dds(file_data, filename, user_input, send_target)
-            if not content_for_dds.strip():
-                st.error("❌ 送信するコンテンツがありません")
-                st.stop()
+            subject_message = send_message if send_message else "（メッセージなし）"
             
-            content_wrapper = MessageWrapper(content_for_dds, "content")
-            violations, request_id, response_data, error_info, elapsed1 = send_detection_request(
-                content_wrapper,
-                "message",
-                st.session_state.dds_url,
-                st.session_state.verify_ssl,
+            violations, request_id, response_data, error_info, elapsed1 = send_detection_request_with_attachments(
+                file_data=send_file_data,
+                filename=send_filename,
+                user_message=subject_message,
+                dds_url=st.session_state.dds_url,
+                verify_ssl=st.session_state.verify_ssl,
                 data_type="DIM",
-                content_block_id="content-001"
+                content_block_id="subject-001"
             )
             
             if violations is None:
@@ -1937,7 +1994,6 @@ with main_col:
                 policy_names = [v["name"] for v in violations]
                 st.session_state.blocked_content = True
                 
-                # 大きな警告表示（ブロック）
                 st.error(f"""
                 🚫 **【ブロック】ポリシー違反が検出されました**
                 
@@ -1950,7 +2006,6 @@ with main_col:
                 
                 add_debug_log("Inline-ステップ1", f"ブロック: ポリシー違反 {', '.join(policy_names)}", "error", elapsed1)
                 
-                # ブロックメッセージを履歴に追加
                 block_msg = f"""
 🚫 **【ブロック】ポリシー違反が検出されました**
 
@@ -1976,12 +2031,9 @@ with main_col:
                         with st.expander("📋 DDSレスポンス詳細", expanded=False):
                             st.markdown(dds_response_text)
                 
-                # ============================================================
-                # ★★★ ここで処理を完全に停止！ ★★★
-                # ============================================================
                 st.error("❌ ポリシー違反のため、後続の処理を停止します。")
                 add_debug_log("Inline-停止", "ポリシー違反により処理を停止", "error")
-                st.stop()  # ← これ以降の処理は一切実行されない
+                st.stop()
             
             # ---- ブロックされていない場合のみ継続 ----
             st.success("✅ ポリシー違反はありません - 継続処理します")
@@ -2004,12 +2056,12 @@ with main_col:
             status_placeholder.info(f"⏳ AI応答を待っています...")
             
             with st.spinner(f"🤖 {st.session_state.ai_model} に送信中..."):
-                if file_data and filename and not file_is_empty:
+                if send_file_data and send_filename:
                     ai_response, ai_elapsed = call_ai_with_file(
                         ai_messages,
-                        file_bytes=file_data,
-                        filename=filename,
-                        mime_type=get_mime_type(filename),
+                        file_bytes=send_file_data,
+                        filename=send_filename,
+                        mime_type=get_mime_type(send_filename),
                         max_tokens=200
                     )
                 else:
@@ -2040,7 +2092,6 @@ with main_col:
             
             if ai_response_has_violation:
                 ai_policy_names = [v["name"] for v in ai_check_violations]
-                # 大きな警告表示（AI回答は表示しない）
                 st.error(f"""
                 🚨 **【警告】AIの回答にポリシー違反が検出されました**
                 
@@ -2053,7 +2104,6 @@ with main_col:
                 
                 add_debug_log("Inline-ステップ1.6", f"AI回答にポリシー違反: {', '.join(ai_policy_names)} - 表示ブロック", "error", ai_check_elapsed)
                 
-                # 警告メッセージを履歴に追加（AI回答は表示しない）
                 warn_msg = f"""
 🚨 **【警告】AIの回答にポリシー違反が検出されました**
 
@@ -2079,18 +2129,14 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                         with st.expander("📋 DDSレスポンス詳細", expanded=False):
                             st.markdown(ai_check_dds_response)
                 
-                # ============================================================
-                # ★★★ AI回答に違反があった場合も処理を停止！ ★★★
-                # ============================================================
                 st.error("❌ AI回答にポリシー違反があるため、後続の処理を停止します。")
                 add_debug_log("Inline-停止", "AI回答のポリシー違反により処理を停止", "error")
-                st.stop()  # ← これ以降の処理（情報チェックAI含む）は一切実行されない
+                st.stop()
             
             # ---- AI回答に違反がなかった場合のみ表示 ----
             st.success("✅ AI回答にポリシー違反はありません")
             add_debug_log("Inline-ステップ1.6", "AI回答にポリシー違反なし", "success", ai_check_elapsed)
             
-            # 違反なし → AI回答を表示
             msg_data = {
                 "role": "assistant",
                 "content": ai_response,
@@ -2108,7 +2154,7 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                         st.markdown(ai_check_dds_response)
             
             # ============================================================
-            # ステップ2: 情報チェックAIを実行（違反がなかった場合のみ）
+            # ステップ2: 情報チェックAIを実行
             # ============================================================
             info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
             info_result = None
@@ -2159,7 +2205,7 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                     add_debug_log("Inline-ステップ2", "分析結果を取得できませんでした", "error", info_elapsed)
             
             # ============================================================
-            # ステップ3: ZIP作成してDDSに送信（違反がなかった場合のみ）
+            # ステップ3: ZIP作成してDDSに送信
             # ============================================================
             if info_result and info_result != "検出結果なし":
                 step3_start = time.time()
