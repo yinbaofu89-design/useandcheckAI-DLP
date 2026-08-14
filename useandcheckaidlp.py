@@ -183,10 +183,10 @@ def build_data_url(file_bytes, mime_type):
     encoded = base64.b64encode(file_bytes).decode("utf-8")
     return f"data:{mime_type};base64,{encoded}"
 
-# ==================== ZIP作成関数（新規追加） ====================
+# ==================== ZIP作成関数 ====================
 def create_zip_for_dds(info_check_result, file_data, filename, user_message, send_target):
     """
-    情報チェックAI分析結果と元のファイル/メッセージをZIPにまとめる
+    情報チェックAI分析結果と元の内容をZIPにまとめる
     
     Args:
         info_check_result: 情報チェックAIの分析結果（テキスト）
@@ -222,16 +222,25 @@ def create_zip_for_dds(info_check_result, file_data, filename, user_message, sen
         
         # 3. 元のファイルを追加（ファイルがある場合）
         if file_data and filename and send_target in ["file", "both"]:
-            # 元のファイル名をそのまま使用
             zip_file.writestr(f"original_{filename}", file_data)
     
     zip_buffer.seek(0)
     return zip_buffer
 
-# ==================== ZIPファイルをDDSに送信する関数（新規追加） ====================
+# ==================== ZIPファイルをDDSに送信する関数 ====================
 def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_block_id=None):
     """
-    ZIPファイルをDDSに送信する関数（ファイル名を正しく設定）
+    ZIPファイルをDDSに送信する
+    
+    Args:
+        zip_data: ZIPファイルのバイナリデータ（BytesIO）
+        dds_url: DDSのURL
+        verify_ssl: SSL検証フラグ
+        source_type: 送信元タイプ
+        content_block_id: コンテンツブロックID
+    
+    Returns:
+        violations, request_id, response_data, error_info, elapsed
     """
     start_time = time.time()
     
@@ -269,7 +278,7 @@ def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_bl
                     "contentBlockId": block_id,
                     "mimeType": "application/zip",
                     "data": b64_data,
-                    "name": f"info_check_package_{st.session_state.txid[:8]}.zip"  # ← ファイル名を設定！
+                    "name": f"info_check_package_{st.session_state.txid[:8]}.zip"
                 }
             ]
         }
@@ -285,6 +294,7 @@ def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_bl
             add_debug_log("DDS ZIPリクエスト", f"ZIPファイル送信 (サイズ: {len(file_bytes)}バイト)", "info", 0, {
                 "url": dds_url,
                 "zip_size": len(file_bytes),
+                "file_name": f"info_check_package_{st.session_state.txid[:8]}.zip",
                 "request_data": request_data
             })
         
@@ -1324,7 +1334,7 @@ with main_col:
     st.caption(f"{mode_color} 現在のモード: **{st.session_state.operation_mode}** | 送信ターゲット: **{send_target}**")
     
     if st.session_state.operation_mode == "Inline":
-        st.info("🔒 **Inlineモード**: 送信内容をDDSでチェックし、違反があればブロックします。その後、情報チェックAI分析を実行します。")
+        st.info("🔒 **Inlineモード**: 送信内容をDDSでチェックし、違反があれば処理を停止します")
     
     if st.session_state.show_dds_response:
         st.info("📋 DDSレスポンス表示: **ON** - すべてのDDSレスポンスが表示されます")
@@ -1680,7 +1690,7 @@ with main_col:
                     st.warning("⚠️ 情報チェックAIの分析結果を取得できませんでした")
                     add_debug_log("Monitor-2-ステップ1", "分析結果を取得できませんでした", "error", info_elapsed)
             
-            # ---- ステップ6: ZIP作成してDDSに送信（新規） ----
+            # ---- ステップ6: ZIP作成してDDSに送信 ----
             if info_result and info_result != "検出結果なし":
                 step6_start = time.time()
                 add_debug_log("Monitor-2-ステップ2", "ZIPファイルを作成してDDSに送信中...", "info")
@@ -1771,10 +1781,10 @@ with main_col:
             st.success(f"✅ **Monitorモード完了** (合計: {time.time() - st.session_state.process_start_time:.2f}秒)")
             add_debug_log("Monitor-完了", f"全ての処理が完了しました", "success", time.time() - st.session_state.process_start_time)
         
-        # ==================== Inlineモード ====================
+        # ==================== Inlineモード（st.stop() 実装版） ====================
         else:
             st.info(f"📊 **Inlineモード**で実行します")
-            st.info("🔒 送信内容をDDSでチェックし、違反があればブロックします")
+            st.info("🔒 送信内容をDDSでチェックし、違反があれば処理を停止します")
             st.info("🔄 情報チェックAI（ZIPでDDS送信）")
             
             # ============================================================
@@ -1813,18 +1823,12 @@ with main_col:
             
             # ---- ブロック判定 ----
             content_has_violation = violations and len(violations) > 0
-            ai_response = None
-            ai_response_has_violation = False
-            ai_check_violations = []
-            ai_check_request_id = None
-            ai_check_dds_response = None
-            ai_elapsed = 0
-            elapsed_time = 0
             
             if content_has_violation:
                 policy_names = [v["name"] for v in violations]
                 st.session_state.blocked_content = True
                 
+                # 大きな警告表示（ブロック）
                 st.error(f"""
                 🚫 **【ブロック】ポリシー違反が検出されました**
                 
@@ -1837,6 +1841,7 @@ with main_col:
                 
                 add_debug_log("Inline-ステップ1", f"ブロック: ポリシー違反 {', '.join(policy_names)}", "error", elapsed1)
                 
+                # ブロックメッセージを履歴に追加
                 block_msg = f"""
 🚫 **【ブロック】ポリシー違反が検出されました**
 
@@ -1862,77 +1867,85 @@ with main_col:
                         with st.expander("📋 DDSレスポンス詳細", expanded=False):
                             st.markdown(dds_response_text)
                 
-                st.info("🔄 ブロックされましたが、情報チェックAI分析を継続します...")
-            else:
-                st.success("✅ ポリシー違反はありません - 継続処理します")
-                add_debug_log("Inline-ステップ1", "ポリシー違反なし - 継続", "success", elapsed1)
+                # ============================================================
+                # ★★★ ここで処理を完全に停止！ ★★★
+                # ============================================================
+                st.error("❌ ポリシー違反のため、後続の処理を停止します。")
+                add_debug_log("Inline-停止", "ポリシー違反により処理を停止", "error")
+                st.stop()  # ← これ以降の処理は一切実行されない
+            
+            # ---- ブロックされていない場合のみ継続 ----
+            st.success("✅ ポリシー違反はありません - 継続処理します")
+            add_debug_log("Inline-ステップ1", "ポリシー違反なし - 継続", "success", elapsed1)
+            
+            # ---- ステップ1.5: AIに送信 ----
+            add_debug_log("Inline-ステップ1.5", "AIにリクエストを送信中...", "info")
+            st.info("🤖 [Inline-1.5] AIにリクエストを送信中...")
+            
+            ai_messages = []
+            for msg in st.session_state.messages:
+                if msg["role"] != "assistant" or "violations" not in msg:
+                    ai_messages.append({"role": msg["role"], "content": msg["content"]})
+            
+            current_msg = user_input
+            ai_messages.append({"role": "user", "content": current_msg})
+            
+            start_time = time.time()
+            status_placeholder = st.empty()
+            status_placeholder.info(f"⏳ AI応答を待っています...")
+            
+            with st.spinner(f"🤖 {st.session_state.ai_model} に送信中..."):
+                if file_data and filename:
+                    ai_response, ai_elapsed = call_ai_with_file(
+                        ai_messages,
+                        file_bytes=file_data,
+                        filename=filename,
+                        mime_type=get_mime_type(filename),
+                        max_tokens=200
+                    )
+                else:
+                    ai_response, ai_elapsed = call_ai_api(ai_messages, max_tokens=200)
+            
+            status_placeholder.empty()
+            elapsed_time = time.time() - start_time
+            
+            if not ai_response:
+                st.error(f"❌ AIからの応答がありませんでした")
+                add_debug_log("Inline-ステップ1.5", f"AI応答なし", "error", ai_elapsed if 'ai_elapsed' in locals() else 0)
+                st.stop()
+            
+            st.success(f"✅ [Inline-1.5] AIからレスポンスを受信 (⏱️ {ai_elapsed:.2f}秒)")
+            add_debug_log("Inline-ステップ1.5", f"AI応答受信", "success", ai_elapsed)
+            
+            # ---- ステップ1.6: AI回答をDDSでチェック ----
+            st.info("🔍 [Inline-1.6] AI回答をDDSでチェック中...")
+            
+            ai_check_violations, ai_check_request_id, ai_check_response_data, ai_check_error, ai_check_elapsed = check_ai_response_with_dds(
+                ai_response, "Inline"
+            )
+            
+            st.info(f"✅ [Inline-1.6] AI回答DDSチェック完了 (⏱️ {ai_check_elapsed:.2f}秒)")
+            
+            ai_check_dds_response = format_dds_response(ai_check_response_data, ai_check_violations, ai_check_request_id) if st.session_state.show_dds_response else None
+            ai_response_has_violation = ai_check_violations and len(ai_check_violations) > 0
+            
+            if ai_response_has_violation:
+                ai_policy_names = [v["name"] for v in ai_check_violations]
+                # 大きな警告表示（AI回答は表示しない）
+                st.error(f"""
+                🚨 **【警告】AIの回答にポリシー違反が検出されました**
                 
-                # ---- ブロックされていない場合のみAIに送信 ----
-                add_debug_log("Inline-ステップ1.5", "AIにリクエストを送信中...", "info")
-                st.info("🤖 [Inline-1.5] AIにリクエストを送信中...")
+                AIが生成した回答に以下のポリシー違反が含まれているため、回答を表示しません。
                 
-                ai_messages = []
-                for msg in st.session_state.messages:
-                    if msg["role"] != "assistant" or "violations" not in msg:
-                        ai_messages.append({"role": msg["role"], "content": msg["content"]})
+                **違反ポリシー:** {', '.join(ai_policy_names)}
                 
-                current_msg = user_input
-                ai_messages.append({"role": "user", "content": current_msg})
+                この回答はDLPの補助情報として記録されます。
+                """)
                 
-                start_time = time.time()
-                status_placeholder = st.empty()
-                status_placeholder.info(f"⏳ AI応答を待っています...")
+                add_debug_log("Inline-ステップ1.6", f"AI回答にポリシー違反: {', '.join(ai_policy_names)} - 表示ブロック", "error", ai_check_elapsed)
                 
-                with st.spinner(f"🤖 {st.session_state.ai_model} に送信中..."):
-                    if file_data and filename:
-                        ai_response, ai_elapsed = call_ai_with_file(
-                            ai_messages,
-                            file_bytes=file_data,
-                            filename=filename,
-                            mime_type=get_mime_type(filename),
-                            max_tokens=200
-                        )
-                    else:
-                        ai_response, ai_elapsed = call_ai_api(ai_messages, max_tokens=200)
-                
-                status_placeholder.empty()
-                elapsed_time = time.time() - start_time
-                
-                if not ai_response:
-                    st.error(f"❌ AIからの応答がありませんでした")
-                    add_debug_log("Inline-ステップ1.5", f"AI応答なし", "error", ai_elapsed if 'ai_elapsed' in locals() else 0)
-                    st.stop()
-                
-                st.success(f"✅ [Inline-1.5] AIからレスポンスを受信 (⏱️ {ai_elapsed:.2f}秒)")
-                add_debug_log("Inline-ステップ1.5", f"AI応答受信", "success", ai_elapsed)
-                
-                # ---- ステップ1.6: AI回答をDDSでチェック ----
-                st.info("🔍 [Inline-1.6] AI回答をDDSでチェック中...")
-                
-                ai_check_violations, ai_check_request_id, ai_check_response_data, ai_check_error, ai_check_elapsed = check_ai_response_with_dds(
-                    ai_response, "Inline"
-                )
-                
-                st.info(f"✅ [Inline-1.6] AI回答DDSチェック完了 (⏱️ {ai_check_elapsed:.2f}秒)")
-                
-                ai_check_dds_response = format_dds_response(ai_check_response_data, ai_check_violations, ai_check_request_id) if st.session_state.show_dds_response else None
-                ai_response_has_violation = ai_check_violations and len(ai_check_violations) > 0
-                
-                if ai_response_has_violation:
-                    ai_policy_names = [v["name"] for v in ai_check_violations]
-                    st.error(f"""
-                    🚨 **【警告】AIの回答にポリシー違反が検出されました**
-                    
-                    AIが生成した回答に以下のポリシー違反が含まれているため、回答を表示しません。
-                    
-                    **違反ポリシー:** {', '.join(ai_policy_names)}
-                    
-                    この回答はDLPの補助情報として記録されます。
-                    """)
-                    
-                    add_debug_log("Inline-ステップ1.6", f"AI回答にポリシー違反: {', '.join(ai_policy_names)} - 表示ブロック", "error", ai_check_elapsed)
-                    
-                    warn_msg = f"""
+                # 警告メッセージを履歴に追加（AI回答は表示しない）
+                warn_msg = f"""
 🚨 **【警告】AIの回答にポリシー違反が検出されました**
 
 AIが生成した回答に以下のポリシー違反が含まれているため、回答を表示しません。
@@ -1941,43 +1954,52 @@ AIが生成した回答に以下のポリシー違反が含まれているため
 
 この回答はDLPの補助情報として記録されます。
 """
-                    msg_data = {
-                        "role": "assistant",
-                        "content": warn_msg,
-                        "violations": ai_check_violations,
-                        "ai_response_blocked": True
-                    }
+                msg_data = {
+                    "role": "assistant",
+                    "content": warn_msg,
+                    "violations": ai_check_violations,
+                    "ai_response_blocked": True
+                }
+                if ai_check_dds_response:
+                    msg_data["dds_response"] = ai_check_dds_response
+                st.session_state.messages.append(msg_data)
+                
+                with st.chat_message("assistant"):
+                    st.error(warn_msg)
                     if ai_check_dds_response:
-                        msg_data["dds_response"] = ai_check_dds_response
-                    st.session_state.messages.append(msg_data)
-                    
-                    with st.chat_message("assistant"):
-                        st.error(warn_msg)
-                        if ai_check_dds_response:
-                            with st.expander("📋 DDSレスポンス詳細", expanded=False):
-                                st.markdown(ai_check_dds_response)
-                else:
-                    st.success("✅ AI回答にポリシー違反はありません")
-                    add_debug_log("Inline-ステップ1.6", "AI回答にポリシー違反なし", "success", ai_check_elapsed)
-                    
-                    msg_data = {
-                        "role": "assistant",
-                        "content": ai_response,
-                        "violations": []
-                    }
-                    if ai_check_dds_response:
-                        msg_data["dds_response"] = ai_check_dds_response
-                    st.session_state.messages.append(msg_data)
-                    
-                    with st.chat_message("assistant"):
-                        st.write(ai_response)
-                        st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
-                        if ai_check_dds_response:
-                            with st.expander("📋 DDSレスポンス詳細", expanded=False):
-                                st.markdown(ai_check_dds_response)
+                        with st.expander("📋 DDSレスポンス詳細", expanded=False):
+                            st.markdown(ai_check_dds_response)
+                
+                # ============================================================
+                # ★★★ AI回答に違反があった場合も処理を停止！ ★★★
+                # ============================================================
+                st.error("❌ AI回答にポリシー違反があるため、後続の処理を停止します。")
+                add_debug_log("Inline-停止", "AI回答のポリシー違反により処理を停止", "error")
+                st.stop()  # ← これ以降の処理（情報チェックAI含む）は一切実行されない
+            
+            # ---- AI回答に違反がなかった場合のみ表示 ----
+            st.success("✅ AI回答にポリシー違反はありません")
+            add_debug_log("Inline-ステップ1.6", "AI回答にポリシー違反なし", "success", ai_check_elapsed)
+            
+            # 違反なし → AI回答を表示
+            msg_data = {
+                "role": "assistant",
+                "content": ai_response,
+                "violations": []
+            }
+            if ai_check_dds_response:
+                msg_data["dds_response"] = ai_check_dds_response
+            st.session_state.messages.append(msg_data)
+            
+            with st.chat_message("assistant"):
+                st.write(ai_response)
+                st.caption(f"⏱️ 応答時間: {elapsed_time:.2f}秒")
+                if ai_check_dds_response:
+                    with st.expander("📋 DDSレスポンス詳細", expanded=False):
+                        st.markdown(ai_check_dds_response)
             
             # ============================================================
-            # ステップ2: 情報チェックAI（ZIPでDDS送信）
+            # ステップ2: 情報チェックAIを実行（違反がなかった場合のみ）
             # ============================================================
             info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
             info_result = None
@@ -1988,7 +2010,7 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                 st.info("🔍 [Inline-2] 情報チェックAIで分析中...")
                 
                 additional_context = ""
-                if ai_response and not content_has_violation:
+                if ai_response:
                     if ai_response_has_violation:
                         ai_policy_names = [v["name"] for v in ai_check_violations]
                         additional_context += f"【AI回答のDDSチェック結果】\n"
@@ -2000,9 +2022,6 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                         additional_context += f"【AI回答のDDSチェック結果】\n"
                         additional_context += f"- 違反検出: なし\n"
                         additional_context += f"- チェックID: {ai_check_request_id}\n"
-                else:
-                    additional_context += f"【AI回答のDDSチェック】\n"
-                    additional_context += f"- 送信がブロックされたため、AI回答はありません\n"
                 
                 info_result, info_elapsed = run_information_check_ai(
                     file_data,
@@ -2031,7 +2050,7 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                     add_debug_log("Inline-ステップ2", "分析結果を取得できませんでした", "error", info_elapsed)
             
             # ============================================================
-            # ステップ3: ZIP作成してDDSに送信（新規）
+            # ステップ3: ZIP作成してDDSに送信（違反がなかった場合のみ）
             # ============================================================
             if info_result and info_result != "検出結果なし":
                 step3_start = time.time()
@@ -2071,16 +2090,8 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                     
                     if v3 and len(v3) > 0:
                         policy_names = [v["name"] for v in v3]
-                        st.error(f"""
-                        🚨 **【警告】情報チェックAI分析結果（ZIP）にポリシー違反が検出されました**
-                        
-                        情報チェックAIの分析結果と元の内容を含むZIPファイルに以下のポリシー違反が含まれています。
-                        
-                        **違反ポリシー:** {', '.join(policy_names)}
-                        
-                        この内容はDLPの補助情報として記録されます。
-                        """)
-                        add_debug_log("Inline-ステップ4", f"ZIPにポリシー違反: {', '.join(policy_names)}", "error", elapsed3)
+                        st.warning(f"⚠️ 情報チェックAI分析結果（ZIP）に{len(v3)}件のポリシー違反: {', '.join(policy_names)}")
+                        add_debug_log("Inline-ステップ4", f"ZIPにポリシー違反: {', '.join(policy_names)}", "warning", elapsed3)
                     else:
                         st.success("✅ 情報チェックAI分析結果（ZIP）にポリシー違反はありません")
                         add_debug_log("Inline-ステップ4", "ZIPにポリシー違反なし", "success", elapsed3)
@@ -2099,14 +2110,11 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                     info_msg += "\n"
                     if v3 and len(v3) > 0:
                         policy_names = [v["name"] for v in v3]
-                        info_msg += f"🚨 検出された違反: {', '.join(policy_names)}\n\n"
+                        info_msg += f"⚠️ 検出された違反: {', '.join(policy_names)}\n\n"
                     else:
                         info_msg += "✅ 違反は検出されませんでした\n\n"
                     info_msg += "---\n"
                     info_msg += f"**分析結果:**\n```\n{info_result}\n```"
-                    
-                    if st.session_state.blocked_content:
-                        info_msg = "🚫 **（送信はブロックされました）**\n\n" + info_msg
                     
                     msg_data = {
                         "role": "assistant",
@@ -2119,8 +2127,6 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                     st.session_state.messages.append(msg_data)
                     
                     with st.chat_message("assistant"):
-                        if st.session_state.blocked_content:
-                            st.warning("🚫 送信はブロックされましたが、情報チェックAI分析結果は以下です")
                         st.markdown(info_msg)
                         if info_dds_response:
                             with st.expander("📋 DDSレスポンス詳細", expanded=False):
