@@ -227,10 +227,10 @@ def create_zip_for_dds(info_check_result, file_data, filename, user_message, sen
     zip_buffer.seek(0)
     return zip_buffer
 
-# ==================== ZIPファイルをDDSに送信する関数 ====================
+# ==================== ZIPファイルをDDSに送信する関数（PowerShellと同じ構造） ====================
 def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_block_id=None):
     """
-    ZIPファイルをDDSに送信する
+    ZIPファイルをDDSに送信する（PowerShellと同じ構造）
     
     Args:
         zip_data: ZIPファイルのバイナリデータ（BytesIO）
@@ -249,6 +249,14 @@ def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_bl
         file_bytes = zip_data.read()
         b64_data = base64.b64encode(file_bytes).decode('utf-8')
         
+        # ============================================================
+        # PowerShellと同じ構造にする
+        # ============================================================
+        
+        # subject.data: ファイル名の説明（PowerShellと同じ）
+        subject_text = f"ZIP file: info_check_package_{st.session_state.txid[:8]}.zip"
+        subject_base64 = base64.b64encode(subject_text.encode('utf-8')).decode('utf-8')
+        
         context = [
             {"name": "common.dataType", "value": ["DIM"]},
             {"name": "common.application", "value": [st.session_state.get("dlp_application", "securlet.box")]},
@@ -262,23 +270,24 @@ def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_bl
         if st.session_state.get("client_user"):
             context.append({"name": "client.user.id", "value": [st.session_state.client_user]})
         
-        block_id = content_block_id or "zip-001"
+        block_id = content_block_id or "attachment-001"  # PowerShellと同じID
         
+        # ============================================================
+        # PowerShellと同じ構造のリクエスト
+        # ============================================================
         request_data = {
             "context": context,
             "subject": {
                 "contentBlockId": "subject-001",
                 "mimeType": "text/plain",
-                "data": base64.b64encode(
-                    f"ZIP: 情報チェックAI分析結果 + 元の内容 (トランザクション: {st.session_state.txid})".encode('utf-8')
-                ).decode('utf-8')
+                "data": subject_base64
             },
             "attachments": [
                 {
                     "contentBlockId": block_id,
+                    "fileName": f"info_check_package_{st.session_state.txid[:8]}.zip",
                     "mimeType": "application/zip",
-                    "data": b64_data,
-                    "fileName": f"info_check_package_{st.session_state.txid[:8]}.zip"  # ← name → fileName に修正
+                    "data": b64_data
                 }
             ]
         }
@@ -295,6 +304,7 @@ def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_bl
                 "url": dds_url,
                 "zip_size": len(file_bytes),
                 "file_name": f"info_check_package_{st.session_state.txid[:8]}.zip",
+                "subject_text": subject_text,
                 "request_data": request_data
             })
         
@@ -863,19 +873,23 @@ def send_detection_request(file_obj, source_type, dds_url, verify_ssl, data_type
             
             block_id = re.sub(r'[^a-zA-Z0-9-]', '-', file_obj.name) + "-001"
             
+            # subject.data: ファイル名の説明
+            subject_text = f"File: {file_obj.name}"
+            subject_base64 = base64.b64encode(subject_text.encode('utf-8')).decode('utf-8')
+            
             request_data = {
                 "context": context,
                 "subject": {
                     "contentBlockId": "subject-001",
                     "mimeType": "text/plain",
-                    "data": base64.b64encode(f"ファイル: {file_obj.name}".encode('utf-8')).decode('utf-8')
+                    "data": subject_base64
                 },
                 "attachments": [
                     {
                         "contentBlockId": block_id,
                         "mimeType": file_mime,
                         "data": b64_data,
-                        "fileName": file_obj.name  # ← name → fileName に修正
+                        "fileName": file_obj.name
                     }
                 ]
             }
@@ -1708,7 +1722,7 @@ with main_col:
                 zip_size = len(zip_data.getvalue())
                 st.info(f"📦 ZIP作成完了: {zip_size/1024:.1f} KB")
                 
-                # ZIPをDDSに送信
+                # ZIPをDDSに送信（修正版）
                 v3, request_id3, response_data3, error_info3, elapsed6 = send_zip_to_dds(
                     zip_data=zip_data,
                     dds_url=st.session_state.dds_url,
