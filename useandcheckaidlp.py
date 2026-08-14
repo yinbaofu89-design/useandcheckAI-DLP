@@ -11,6 +11,8 @@ import threading
 import io
 from PIL import Image
 import re
+import zipfile
+from io import BytesIO
 
 # ページ設定
 st.set_page_config(
@@ -89,7 +91,7 @@ if "info_check_items" not in st.session_state:
         {"name": "日本の銀行口座情報", "enabled": True},
         {"name": "日本のクレジットカード情報", "enabled": True},
         {"name": "日本のマイナンバー情報", "enabled": True},
-        {"name": "メールアドレス", "enabled": True},  # メールアドレスを追加
+        {"name": "メールアドレス", "enabled": True},
     ]
 
 # ==================== AIプロバイダー設定 ====================
@@ -181,6 +183,183 @@ def build_data_url(file_bytes, mime_type):
     encoded = base64.b64encode(file_bytes).decode("utf-8")
     return f"data:{mime_type};base64,{encoded}"
 
+# ==================== ZIP作成関数（新規追加） ====================
+def create_zip_for_dds(info_check_result, file_data, filename, user_message, send_target):
+    """
+    情報チェックAI分析結果と元のファイル/メッセージをZIPにまとめる
+    
+    Args:
+        info_check_result: 情報チェックAIの分析結果（テキスト）
+        file_data: 元のファイルデータ（バイナリ）
+        filename: 元のファイル名
+        user_message: 元のユーザーメッセージ
+        send_target: 送信ターゲット（"file", "message", "both"）
+    
+    Returns:
+        BytesIO: ZIPファイルのバイナリデータ
+    """
+    zip_buffer = BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # 1. 情報チェックAI分析結果を追加
+        info_content = f"""=== 情報チェックAI分析結果 ===
+{info_check_result}
+
+=== 送信ターゲット ===
+{send_target}
+
+=== 作成日時 ===
+{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        zip_file.writestr("info_check_result.txt", info_content.encode('utf-8'))
+        
+        # 2. 元のメッセージを追加（メッセージがある場合）
+        if user_message and send_target in ["message", "both"]:
+            message_content = f"""=== ユーザーメッセージ ===
+{user_message}
+"""
+            zip_file.writestr("user_message.txt", message_content.encode('utf-8'))
+        
+        # 3. 元のファイルを追加（ファイルがある場合）
+        if file_data and filename and send_target in ["file", "both"]:
+            # 元のファイル名をそのまま使用
+            zip_file.writestr(f"original_{filename}", file_data)
+    
+    zip_buffer.seek(0)
+    return zip_buffer
+
+# ==================== ZIPファイルをDDSに送信する関数（新規追加） ====================
+def send_zip_to_dds(zip_data, dds_url, verify_ssl, source_type="zip", content_block_id=None):
+    """
+    ZIPファイルをDDSに送信する
+    
+    Args:
+        zip_data: ZIPファイルのバイナリデータ（BytesIO）
+        dds_url: DDSのURL
+        verify_ssl: SSL検証フラグ
+        source_type: 送信元タイプ
+        content_block_id: コンテンツブロックID
+    
+    Returns:
+        violations, request_id, response_data, error_info, elapsed
+    """
+    start_time = time.time()
+    
+    try:
+        zip_data.seek(0)
+        file_bytes = zip_data.read()
+        b64_data = base64.b64encode(file_bytes).decode('utf-8')
+        
+        context = [
+            {"name": "common.dataType", "value": ["DIM"]},
+            {"name": "common.application", "value": [st.session_state.get("dlp_application", "securlet.box")]},
+            {"name": "common.transactionId", "value": [st.session_state.txid]},
+            {"name": "common.filter", "value": [f["id"] for f in st.session_state.filters]},
+            {"name": "common.expectActionsAck", "value": ["true"]},
+        ]
+        
+        if st.session_state.get("client_domain"):
+            context.append({"name": "client.domain", "value": [st.session_state.client_domain]})
+        if st.session_state.get("client_user"):
+            context.append({"name": "client.user.id", "value": [st.session_state.client_user]})
+        
+        block_id = content_block_id or "zip-001"
+        
+        request_data = {
+            "context": context,
+            "subject": {
+                "contentBlockId": "subject-001",
+                "mimeType": "text/plain",
+                "data": base64.b64encode(f"ZIPファイル: 情報チェックAI分析結果 + 元の内容".encode('utf-8')).decode('utf-8')
+            },
+            "attachments": [
+                {
+                    "contentBlockId": block_id,
+                    "mimeType": "application/zip",
+                    "data": b64_data,
+                    "name": "info_check_package.zip"
+                }
+            ]
+        }
+        
+        json_data = json.dumps(request_data, ensure_ascii=False)
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        if st.session_state.debug_mode:
+            add_debug_log("DDS ZIPリクエスト", f"ZIPファイル送信 (サイズ: {len(file_bytes)}バイト)", "info", 0, {
+                "url": dds_url,
+                "zip_size": len(file_bytes),
+                "request_data": request_data
+            })
+        
+        response = requests.post(
+            dds_url,
+            data=json_data,
+            headers=headers,
+            verify=not verify_ssl,
+            timeout=60
+        )
+        
+        elapsed = time.time() - start_time
+        
+        try:
+            response_json = response.json()
+            
+            if st.session_state.debug_mode:
+                add_debug_log("DDS ZIPレスポンス", f"ステータス: {response.status_code}", 
+                             "success" if response.status_code == 201 else "error", elapsed, {
+                                "status_code": response.status_code,
+                                "response": response_json
+                            })
+            
+            if response.status_code == 201:
+                violations = response_json.get("violation", [])
+                if violations is None:
+                    violations = []
+                request_id = response_json.get("requestId")
+                return violations, request_id, response_json, None, elapsed
+            else:
+                error_info = {
+                    "status_code": response.status_code,
+                    "response_text": response.text,
+                    "headers": dict(response.headers)
+                }
+                return [], None, None, error_info, elapsed
+                
+        except Exception as e:
+            error_info = {
+                "status_code": response.status_code,
+                "response_text": response.text,
+                "error": str(e)
+            }
+            return [], None, None, error_info, elapsed
+            
+    except requests.exceptions.ConnectionError as e:
+        error_info = {
+            "error_type": "ConnectionError",
+            "message": str(e),
+            "dds_url": dds_url
+        }
+        return [], None, None, error_info, time.time() - start_time
+    except requests.exceptions.Timeout as e:
+        error_info = {
+            "error_type": "Timeout",
+            "message": str(e)
+        }
+        return [], None, None, error_info, time.time() - start_time
+    except Exception as e:
+        error_info = {
+            "error_type": "Exception",
+            "message": str(e)
+        }
+        import traceback
+        error_info["traceback"] = traceback.format_exc()
+        return [], None, None, error_info, time.time() - start_time
+
 # ==================== デバッグログ関数 ====================
 def add_debug_log(step, message, log_type="info", elapsed_time=None, details=None):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -257,9 +436,8 @@ def render_debug_logs():
     
     st.caption(f"📊 ログ件数: {len(st.session_state.debug_logs)} 件")
 
-# ==================== 情報チェックAIプロンプト（修正版） ====================
+# ==================== 情報チェックAIプロンプト ====================
 def build_information_check_prompt(check_items):
-    """情報チェックAIのプロンプトを生成する"""
     items = [x["name"] for x in check_items if x.get("enabled")]
     item_lines = "\n".join(f"- {item}" for item in items)
 
@@ -292,9 +470,9 @@ def build_information_check_prompt(check_items):
 - 上記は出力形式の例です。実際に含まれている項目だけを出力してください。
 - 含まれていない項目は絶対に出力しないでください。"""
 
-# ==================== ファイル内容抽出関数（修正版） ====================
+# ==================== ファイル内容抽出関数 ====================
 def extract_file_content(file_bytes, filename, max_chars=5000):
-    """ファイルからテキスト内容を抽出する（バイナリファイル対応）"""
+    """ファイルからテキスト内容を抽出する"""
     mime = get_mime_type(filename)
     
     # テキストファイル
@@ -310,32 +488,35 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
     # Word文書 (.docx)
     elif filename.lower().endswith(".docx"):
         try:
-            # python-docx をインポート
-            import docx
+            try:
+                import docx
+            except ImportError:
+                return f"（Wordファイル: {filename}、{len(file_bytes)}バイト - python-docxが必要です）"
+            
             doc = docx.Document(io.BytesIO(file_bytes))
             text = "\n".join([para.text for para in doc.paragraphs])
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        text += cell.text + "\n"
             if len(text) > max_chars:
                 return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
             return text
-        except ImportError:
-            # python-docx がない場合は代替手段
-            return f"（Wordファイル: {filename}、{len(file_bytes)}バイト - python-docxが必要です）"
         except Exception as e:
-            return f"（Wordファイル抽出エラー: {e}）"
+            return f"（Word抽出エラー: {e}）"
     
     # 古いWord文書 (.doc)
     elif filename.lower().endswith(".doc"):
-        try:
-            # antiword または catdoc を使用するか、テキスト抽出を試みる
-            # 簡易的にファイルサイズと名前のみ返す
-            return f"（Wordファイル: {filename}、{len(file_bytes)}バイト - テキスト抽出には変換が必要です）"
-        except:
-            return f"（Wordファイル: {filename}、{len(file_bytes)}バイト）"
+        return f"（Wordファイル: {filename}、{len(file_bytes)}バイト - .doc形式はpython-docx非対応）"
     
     # PDFファイル
     elif filename.lower().endswith(".pdf"):
         try:
-            import PyPDF2
+            try:
+                import PyPDF2
+            except ImportError:
+                return f"（PDFファイル: {filename}、{len(file_bytes)}バイト - PyPDF2が必要です）"
+            
             reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
             text = ""
             for page in reader.pages:
@@ -343,15 +524,17 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
             if len(text) > max_chars:
                 return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
             return text
-        except ImportError:
-            return f"（PDFファイル: {filename}、{len(file_bytes)}バイト - PyPDF2が必要です）"
         except Exception as e:
             return f"（PDF抽出エラー: {e}）"
     
     # Excelファイル (.xlsx)
     elif filename.lower().endswith((".xlsx", ".xls")):
         try:
-            import openpyxl
+            try:
+                import openpyxl
+            except ImportError:
+                return f"（Excelファイル: {filename}、{len(file_bytes)}バイト - openpyxlが必要です）"
+            
             wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
             text = ""
             for sheet in wb.worksheets:
@@ -363,8 +546,6 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
             if len(text) > max_chars:
                 return text[:max_chars] + f"\n... (省略: {len(text) - max_chars}文字)"
             return text
-        except ImportError:
-            return f"（Excelファイル: {filename}、{len(file_bytes)}バイト - openpyxlが必要です）"
         except Exception as e:
             return f"（Excel抽出エラー: {e}）"
     
@@ -372,40 +553,25 @@ def extract_file_content(file_bytes, filename, max_chars=5000):
     else:
         return f"（バイナリファイル: {filename}、{len(file_bytes)}バイト）"
 
-# ==================== 情報チェックAI実行（修正版） ====================
+# ==================== 情報チェックAI実行 ====================
 def run_information_check_ai(file_bytes, filename, user_message, check_items, additional_context=None):
-    """
-    情報チェックAIを実行する（ファイル内容を確実に渡す）
-    
-    Args:
-        file_bytes: ファイルデータ
-        filename: ファイル名
-        user_message: ユーザーメッセージ
-        check_items: チェック項目リスト
-        additional_context: 追加のコンテキスト情報
-    """
     prompt = build_information_check_prompt(check_items)
     
-    # システムメッセージ
     messages = [
         {"role": "system", "content": prompt},
         {"role": "user", "content": "以下の内容を分析し、該当する情報があれば出力してください。"}
     ]
     
     user_content = ""
-    
-    # ユーザーメッセージ
     if user_message:
         user_content += f"【メッセージ】\n{user_message}\n\n"
     
-    # ファイル内容（確実に抽出して渡す）
     if file_bytes and filename:
         user_content += f"【ファイル: {filename}】\n"
         file_text = extract_file_content(file_bytes, filename)
         user_content += file_text
         user_content += "\n"
     
-    # 追加コンテキスト
     if additional_context:
         user_content += "\n【追加コンテキスト情報】\n"
         user_content += additional_context
@@ -491,7 +657,6 @@ def call_ai_api(messages, max_tokens=200):
                 if not content or content.strip() == "":
                     content = "検出結果なし"
                 
-                # 余計なテキストを除去
                 if content and content != "検出結果なし":
                     lines = content.strip().split('\n')
                     filtered_lines = []
@@ -667,7 +832,7 @@ def call_ai_with_file(messages, file_bytes=None, filename=None, mime_type=None, 
                     break
         return call_ai_api(messages, max_tokens)
 
-# ==================== DDS送信関数 ====================
+# ==================== DDS送信関数（従来のテキスト送信用） ====================
 def send_detection_request(file_obj, source_type, dds_url, verify_ssl, data_type="DIM", content_block_id=None, mime_type=None):
     start_time = time.time()
     
@@ -848,7 +1013,6 @@ def clear_conversation():
 
 # ==================== DDSレスポンス整形関数 ====================
 def format_dds_response(response_data, violations, request_id):
-    """DDSレスポンスを整形して表示用の文字列を生成"""
     if not response_data:
         return "（DDSレスポンスなし）"
     
@@ -883,7 +1047,6 @@ def format_dds_response(response_data, violations, request_id):
 
 # ==================== AI回答をDDSでチェックする関数 ====================
 def check_ai_response_with_dds(ai_response, step_name):
-    """AIの回答をDDSに送信してチェックする"""
     start_time = time.time()
     
     add_debug_log(f"{step_name}-AI回答チェック", "AI回答をDDSに送信して検査中...", "info")
@@ -953,7 +1116,6 @@ with st.sidebar:
 
     st.divider()
 
-    # DDSレスポンス表示トグル（デフォルト: OFF）
     st.subheader("📋 DDSレスポンス表示")
     show_dds = st.checkbox(
         "DDSレスポンスをチャット履歴に表示",
@@ -1276,13 +1438,13 @@ with main_col:
         if st.session_state.operation_mode == "Monitor":
             st.info(f"📊 **Monitorモード**で実行します")
             st.info("🔄 1つ目のリクエスト: 元の内容 → DDS → AI → AI回答DDSチェック → DDS再検査")
-            st.info("🔄 2つ目のリクエスト: 情報チェックAI（AI回答DDSチェック結果を連携）")
+            st.info("🔄 2つ目のリクエスト: 情報チェックAI（ZIPでDDS送信）")
             
             # ============================================================
-            # 1つ目のリクエスト
+            # 1つ目のリクエスト（元の内容）
             # ============================================================
             
-            # ステップ1: 元の内容をDDSに送信
+            # ---- ステップ1: 元の内容をDDSに送信 ----
             step1_start = time.time()
             add_debug_log("Monitor-1-ステップ1", "元の内容をDDSに送信して検査中...", "info")
             status1 = st.info("🔍 [Monitor-1-1] 元の内容をDDSに送信して検査中...")
@@ -1322,7 +1484,7 @@ with main_col:
                 st.success("✅ ポリシー違反はありませんでした")
                 add_debug_log("Monitor-1-ステップ1", "ポリシー違反なし", "success", elapsed1)
             
-            # ステップ2: AIに送信
+            # ---- ステップ2: AIに送信 ----
             add_debug_log("Monitor-1-ステップ2", "AIにリクエストを送信中...", "info")
             st.info("🤖 [Monitor-1-2] AIにリクエストを送信中...")
             
@@ -1361,7 +1523,7 @@ with main_col:
             st.success(f"✅ [Monitor-1-2] AIからレスポンスを受信 (⏱️ {ai_elapsed:.2f}秒)")
             add_debug_log("Monitor-1-ステップ2", f"AI応答受信", "success", ai_elapsed)
             
-            # ステップ2.5: AI回答をDDSでチェック
+            # ---- ステップ2.5: AI回答をDDSでチェック ----
             st.info("🔍 [Monitor-1-2.5] AI回答をDDSでチェック中...")
             
             ai_check_violations, ai_check_request_id, ai_check_response_data, ai_check_error, ai_check_elapsed = check_ai_response_with_dds(
@@ -1373,7 +1535,7 @@ with main_col:
             ai_check_dds_response = format_dds_response(ai_check_response_data, ai_check_violations, ai_check_request_id) if st.session_state.show_dds_response else None
             ai_response_has_violation = ai_check_violations and len(ai_check_violations) > 0
             
-            # ステップ3: AI応答をDDSに送信（再検査）
+            # ---- ステップ3: AI応答をDDSに再送信（再検査） ----
             step3_start = time.time()
             add_debug_log("Monitor-1-ステップ3", "AI応答をDDSに送信して再検査中...", "info")
             st.info("🔍 [Monitor-1-3] AI応答をDDSに送信して再検査中...")
@@ -1401,7 +1563,7 @@ with main_col:
             
             dds_response_text = format_dds_response(response_data2, v2, request_id2) if st.session_state.show_dds_response else None
             
-            # ステップ4: 結果表示
+            # ---- ステップ4: 結果表示 ----
             if ai_response_has_violation:
                 ai_policy_names = [v["name"] for v in ai_check_violations]
                 st.warning(f"⚠️ AIの回答にポリシー違反が検出されました: {', '.join(ai_policy_names)}")
@@ -1463,18 +1625,19 @@ with main_col:
                             st.markdown(ai_check_dds_response)
             
             # ============================================================
-            # 2つ目のリクエスト: 情報チェックAI
+            # 2つ目のリクエスト: 情報チェックAI（ZIPでDDS送信）
             # ============================================================
             st.divider()
-            st.info("🔄 2つ目のリクエスト: 情報チェックAI分析（AI回答DDSチェック結果を連携）")
+            st.info("🔄 2つ目のリクエスト: 情報チェックAI（ZIPでDDS送信）")
             
+            # ---- ステップ5: 情報チェックAIを実行 ----
             info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
             info_result = None
             info_elapsed = 0
             
             if info_items_enabled:
-                add_debug_log("Monitor-2-ステップ1", "情報チェックAIで分析中（AI回答DDSチェック結果を連携）...", "info")
-                st.info("🔍 [Monitor-2-1] 情報チェックAIで分析中（AI回答DDSチェック結果を連携）...")
+                add_debug_log("Monitor-2-ステップ1", "情報チェックAIで分析中...", "info")
+                st.info("🔍 [Monitor-2-1] 情報チェックAIで分析中...")
                 
                 additional_context = ""
                 if ai_response_has_violation:
@@ -1516,7 +1679,6 @@ with main_col:
                         info_elapsed,
                         {
                             "check_items": [x["name"] for x in info_items_enabled],
-                            "additional_context": additional_context,
                             "response": info_result
                         }
                     )
@@ -1526,27 +1688,38 @@ with main_col:
                     st.warning("⚠️ 情報チェックAIの分析結果を取得できませんでした")
                     add_debug_log("Monitor-2-ステップ1", "分析結果を取得できませんでした", "error", info_elapsed)
             
-            # ステップ6: 情報チェックAIの結果をDDSに送信
-            if info_result:
+            # ---- ステップ6: ZIP作成してDDSに送信（新規） ----
+            if info_result and info_result != "検出結果なし":
                 step6_start = time.time()
-                add_debug_log("Monitor-2-ステップ2", "情報チェックAI分析結果をDDSに送信...", "info")
-                st.info("🔍 [Monitor-2-2] 情報チェックAI分析結果をDDSに送信して検査中...")
+                add_debug_log("Monitor-2-ステップ2", "ZIPファイルを作成してDDSに送信中...", "info")
+                st.info("📦 [Monitor-2-2] ZIPファイルを作成してDDSに送信中...")
                 
-                info_check_wrapper = MessageWrapper(info_result, "info_check_result")
-                v3, request_id3, response_data3, error_info3, elapsed6 = send_detection_request(
-                    info_check_wrapper,
-                    "message",
-                    st.session_state.dds_url,
-                    st.session_state.verify_ssl,
-                    data_type="DIM",
-                    content_block_id="info-check-001"
+                # ZIP作成
+                zip_data = create_zip_for_dds(
+                    info_check_result=info_result,
+                    file_data=file_data,
+                    filename=filename,
+                    user_message=user_input,
+                    send_target=send_target
+                )
+                
+                zip_size = len(zip_data.getvalue())
+                st.info(f"📦 ZIP作成完了: {zip_size/1024:.1f} KB")
+                
+                # ZIPをDDSに送信
+                v3, request_id3, response_data3, error_info3, elapsed6 = send_zip_to_dds(
+                    zip_data=zip_data,
+                    dds_url=st.session_state.dds_url,
+                    verify_ssl=st.session_state.verify_ssl,
+                    source_type="zip",
+                    content_block_id="info-check-zip-001"
                 )
                 
                 if v3 is None:
                     v3 = []
                 
-                st.info(f"✅ [Monitor-2-2] DDS検査完了 (⏱️ {elapsed6:.2f}秒)")
-                add_debug_log("Monitor-2-ステップ2", f"情報チェック結果DDS検査完了", "success", elapsed6, response_data3)
+                st.info(f"✅ [Monitor-2-2] DDS ZIP検査完了 (⏱️ {elapsed6:.2f}秒)")
+                add_debug_log("Monitor-2-ステップ2", f"ZIP DDS検査完了", "success", elapsed6, response_data3)
                 
                 if error_info3:
                     st.error(f"❌ DDSエラー: {error_info3}")
@@ -1556,21 +1729,24 @@ with main_col:
                     
                     if v3 and len(v3) > 0:
                         policy_names = [v["name"] for v in v3]
-                        st.warning(f"⚠️ 情報チェックAI分析結果に{len(v3)}件のポリシー違反: {', '.join(policy_names)}")
-                        add_debug_log("Monitor-2-ステップ3", f"情報チェック結果にポリシー違反: {', '.join(policy_names)}", "warning", elapsed6)
+                        st.warning(f"⚠️ 情報チェックAI分析結果（ZIP）に{len(v3)}件のポリシー違反: {', '.join(policy_names)}")
+                        add_debug_log("Monitor-2-ステップ3", f"ZIPにポリシー違反: {', '.join(policy_names)}", "warning", elapsed6)
                     else:
-                        st.success("✅ 情報チェックAI分析結果にポリシー違反はありません")
-                        add_debug_log("Monitor-2-ステップ3", "情報チェック結果にポリシー違反なし", "success", elapsed6)
+                        st.success("✅ 情報チェックAI分析結果（ZIP）にポリシー違反はありません")
+                        add_debug_log("Monitor-2-ステップ3", "ZIPにポリシー違反なし", "success", elapsed6)
                     
-                    context_summary = ""
-                    if ai_response_has_violation:
-                        ai_policy_names = [v["name"] for v in ai_check_violations]
-                        context_summary += f"📌 **連携情報: AI回答DDSチェックで {len(ai_check_violations)}件の違反を検出**\n"
-                    else:
-                        context_summary += f"📌 **連携情報: AI回答DDSチェックで違反は検出されませんでした**\n"
+                    # ZIP内の内容を説明するメッセージ
+                    zip_contents = []
+                    zip_contents.append("📦 **ZIPファイル内容:**")
+                    zip_contents.append(f"  - info_check_result.txt: 情報チェックAI分析結果")
+                    if user_input and send_target in ["message", "both"]:
+                        zip_contents.append(f"  - user_message.txt: ユーザーメッセージ")
+                    if file_data and filename and send_target in ["file", "both"]:
+                        zip_contents.append(f"  - original_{filename}: 元のファイル")
+                    zip_contents.append("")
                     
-                    info_msg = f"📊 **情報チェックAI分析結果のDDS検査**\n\n"
-                    info_msg += context_summary
+                    info_msg = f"📊 **情報チェックAI分析結果（ZIPでDDS送信）**\n\n"
+                    info_msg += "\n".join(zip_contents)
                     info_msg += "\n"
                     if v3 and len(v3) > 0:
                         policy_names = [v["name"] for v in v3]
@@ -1595,8 +1771,10 @@ with main_col:
                         if info_dds_response:
                             with st.expander("📋 DDSレスポンス詳細", expanded=False):
                                 st.markdown(info_dds_response)
+            elif info_result == "検出結果なし":
+                st.info("ℹ️ 情報チェックAIで検出結果がなかったため、ZIP送信をスキップしました")
             else:
-                st.warning("⚠️ 情報チェックAIの結果がないため、DDSへの送信をスキップしました")
+                st.warning("⚠️ 情報チェックAIの結果がないため、ZIP送信をスキップしました")
             
             st.success(f"✅ **Monitorモード完了** (合計: {time.time() - st.session_state.process_start_time:.2f}秒)")
             add_debug_log("Monitor-完了", f"全ての処理が完了しました", "success", time.time() - st.session_state.process_start_time)
@@ -1605,7 +1783,7 @@ with main_col:
         else:
             st.info(f"📊 **Inlineモード**で実行します")
             st.info("🔒 送信内容をDDSでチェックし、違反があればブロックします")
-            st.info("🔄 情報チェックAIにAI回答DDSチェック結果を連携します")
+            st.info("🔄 情報チェックAI（ZIPでDDS送信）")
             
             # ============================================================
             # ステップ1: 元の内容をDDSに送信（ブロックチェック）
@@ -1807,15 +1985,15 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                                 st.markdown(ai_check_dds_response)
             
             # ============================================================
-            # ステップ2: 情報チェックAIを実行
+            # ステップ2: 情報チェックAI（ZIPでDDS送信）
             # ============================================================
             info_items_enabled = [x for x in st.session_state.info_check_items if x.get("enabled")]
             info_result = None
             info_elapsed = 0
             
             if info_items_enabled:
-                add_debug_log("Inline-ステップ2", "情報チェックAIで分析中（AI回答DDSチェック結果を連携）...", "info")
-                st.info("🔍 [Inline-2] 情報チェックAIで分析中（AI回答DDSチェック結果を連携）...")
+                add_debug_log("Inline-ステップ2", "情報チェックAIで分析中...", "info")
+                st.info("🔍 [Inline-2] 情報チェックAIで分析中...")
                 
                 additional_context = ""
                 if ai_response and not content_has_violation:
@@ -1851,7 +2029,6 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                         info_elapsed,
                         {
                             "check_items": [x["name"] for x in info_items_enabled],
-                            "additional_context": additional_context,
                             "response": info_result
                         }
                     )
@@ -1862,28 +2039,37 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                     add_debug_log("Inline-ステップ2", "分析結果を取得できませんでした", "error", info_elapsed)
             
             # ============================================================
-            # ステップ3: 情報チェックAIの結果をDDSに送信
+            # ステップ3: ZIP作成してDDSに送信（新規）
             # ============================================================
-            if info_result:
+            if info_result and info_result != "検出結果なし":
                 step3_start = time.time()
-                add_debug_log("Inline-ステップ3", "情報チェックAI分析結果をDDSに送信...", "info")
-                st.info("🔍 [Inline-3] 情報チェックAI分析結果をDDSに送信して検査中...")
+                add_debug_log("Inline-ステップ3", "ZIPファイルを作成してDDSに送信中...", "info")
+                st.info("📦 [Inline-3] ZIPファイルを作成してDDSに送信中...")
                 
-                info_check_wrapper = MessageWrapper(info_result, "info_check_result")
-                v3, request_id3, response_data3, error_info3, elapsed3 = send_detection_request(
-                    info_check_wrapper,
-                    "message",
-                    st.session_state.dds_url,
-                    st.session_state.verify_ssl,
-                    data_type="DIM",
-                    content_block_id="info-check-001"
+                zip_data = create_zip_for_dds(
+                    info_check_result=info_result,
+                    file_data=file_data,
+                    filename=filename,
+                    user_message=user_input,
+                    send_target=send_target
+                )
+                
+                zip_size = len(zip_data.getvalue())
+                st.info(f"📦 ZIP作成完了: {zip_size/1024:.1f} KB")
+                
+                v3, request_id3, response_data3, error_info3, elapsed3 = send_zip_to_dds(
+                    zip_data=zip_data,
+                    dds_url=st.session_state.dds_url,
+                    verify_ssl=st.session_state.verify_ssl,
+                    source_type="zip",
+                    content_block_id="info-check-zip-001"
                 )
                 
                 if v3 is None:
                     v3 = []
                 
-                st.info(f"✅ [Inline-3] DDS検査完了 (⏱️ {elapsed3:.2f}秒)")
-                add_debug_log("Inline-ステップ3", f"情報チェック結果DDS検査完了", "success", elapsed3, response_data3)
+                st.info(f"✅ [Inline-3] DDS ZIP検査完了 (⏱️ {elapsed3:.2f}秒)")
+                add_debug_log("Inline-ステップ3", f"ZIP DDS検査完了", "success", elapsed3, response_data3)
                 
                 if error_info3:
                     st.error(f"❌ DDSエラー: {error_info3}")
@@ -1894,31 +2080,30 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                     if v3 and len(v3) > 0:
                         policy_names = [v["name"] for v in v3]
                         st.error(f"""
-                        🚨 **【警告】情報チェックAI分析結果にポリシー違反が検出されました**
+                        🚨 **【警告】情報チェックAI分析結果（ZIP）にポリシー違反が検出されました**
                         
-                        情報チェックAIの分析結果に以下のポリシー違反が含まれています。
+                        情報チェックAIの分析結果と元の内容を含むZIPファイルに以下のポリシー違反が含まれています。
                         
                         **違反ポリシー:** {', '.join(policy_names)}
                         
                         この内容はDLPの補助情報として記録されます。
                         """)
-                        add_debug_log("Inline-ステップ4", f"情報チェック結果にポリシー違反: {', '.join(policy_names)}", "error", elapsed3)
+                        add_debug_log("Inline-ステップ4", f"ZIPにポリシー違反: {', '.join(policy_names)}", "error", elapsed3)
                     else:
-                        st.success("✅ 情報チェックAI分析結果にポリシー違反はありません")
-                        add_debug_log("Inline-ステップ4", "情報チェック結果にポリシー違反なし", "success", elapsed3)
+                        st.success("✅ 情報チェックAI分析結果（ZIP）にポリシー違反はありません")
+                        add_debug_log("Inline-ステップ4", "ZIPにポリシー違反なし", "success", elapsed3)
                     
-                    context_summary = ""
-                    if ai_response and not content_has_violation:
-                        if ai_response_has_violation:
-                            ai_policy_names = [v["name"] for v in ai_check_violations]
-                            context_summary += f"📌 **連携情報: AI回答DDSチェックで {len(ai_check_violations)}件の違反を検出**\n"
-                        else:
-                            context_summary += f"📌 **連携情報: AI回答DDSチェックで違反は検出されませんでした**\n"
-                    else:
-                        context_summary += f"📌 **連携情報: 送信ブロックのためAI回答なし**\n"
+                    zip_contents = []
+                    zip_contents.append("📦 **ZIPファイル内容:**")
+                    zip_contents.append(f"  - info_check_result.txt: 情報チェックAI分析結果")
+                    if user_input and send_target in ["message", "both"]:
+                        zip_contents.append(f"  - user_message.txt: ユーザーメッセージ")
+                    if file_data and filename and send_target in ["file", "both"]:
+                        zip_contents.append(f"  - original_{filename}: 元のファイル")
+                    zip_contents.append("")
                     
-                    info_msg = f"📊 **情報チェックAI分析結果のDDS検査**\n\n"
-                    info_msg += context_summary
+                    info_msg = f"📊 **情報チェックAI分析結果（ZIPでDDS送信）**\n\n"
+                    info_msg += "\n".join(zip_contents)
                     info_msg += "\n"
                     if v3 and len(v3) > 0:
                         policy_names = [v["name"] for v in v3]
@@ -1948,8 +2133,10 @@ AIが生成した回答に以下のポリシー違反が含まれているため
                         if info_dds_response:
                             with st.expander("📋 DDSレスポンス詳細", expanded=False):
                                 st.markdown(info_dds_response)
+            elif info_result == "検出結果なし":
+                st.info("ℹ️ 情報チェックAIで検出結果がなかったため、ZIP送信をスキップしました")
             else:
-                st.warning("⚠️ 情報チェックAIの結果がないため、DDSへの送信をスキップしました")
+                st.warning("⚠️ 情報チェックAIの結果がないため、ZIP送信をスキップしました")
             
             st.success(f"✅ **Inlineモード完了** (合計: {time.time() - st.session_state.process_start_time:.2f}秒)")
             add_debug_log("Inline-完了", f"全ての処理が完了しました", "success", time.time() - st.session_state.process_start_time)
